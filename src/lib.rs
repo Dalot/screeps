@@ -78,20 +78,27 @@ pub fn game_loop() {
         }
     }
 
-    clean_up();
+    let time = screeps::game::time();
+
+    if time % 32 == 3 {
+        info!("running memory cleanup");
+        clean_up();
+    }
     info!("done! cpu: {}", game::cpu::get_used())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct RootJson {
-    creeps: HashMap<String, CreepJson>,
+struct Root {
+    creeps: HashMap<String, CreepMemory>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct CreepJson {
-    _move: MoveJson,
+struct CreepMemory {
+    _move: Option<Move>,
+    is_manual: Option<bool>,
+    is_upgrader: Option<bool>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct MoveJson {
+struct Move {
     dest: DestJson,
     time: u64,
     path: String,
@@ -106,7 +113,7 @@ struct DestJson {
 fn clean_up() {
     let root_json_string: String = RawMemory::get().into();
     match serde_json::from_str(root_json_string.as_str()) {
-        Ok::<RootJson, _>(mut root_json) => {
+        Ok::<Root, _>(mut root_json) => {
             info!("ROOT: {:?}", root_json);
             let mut to_remove = Vec::<String>::new();
             for (name, _) in root_json.creeps.iter() {
@@ -145,8 +152,78 @@ fn clean_up() {
     }
 }
 
+fn is_upgrader_creep(creep: &Creep) -> bool {
+    match js_sys::Reflect::get(&creep.memory(), &JsValue::from_str("is_upgrader")) {
+        Ok(val) => match val.as_bool() {
+            Some(v) => v,
+
+            None => {
+                debug!("could not find any boolean value inside");
+                false
+            }
+        },
+        Err(e) => {
+            warn!("could not deserialize creep memory, err: {:?}", e);
+            false
+        }
+    }
+}
+fn is_manual_creep(creep: &Creep) -> bool {
+    match js_sys::Reflect::get(&creep.memory(), &JsValue::from_str("is_manual")) {
+        Ok(val) => match val.as_bool() {
+            Some(v) => v,
+
+            None => {
+                debug!("could not find any boolean value inside");
+                false
+            }
+        },
+        Err(e) => {
+            warn!("could not deserialize creep memory, err: {:?}", e);
+            false
+        }
+    }
+}
+
 fn run_creep(creep: &Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
     if creep.spawning() {
+        return;
+    }
+    if is_manual_creep(creep) {
+        return;
+    }
+    if is_upgrader_creep(creep) {
+        if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+            let site = creep.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
+            match site {
+                Some(site) => {
+                    let r = creep.build(&site);
+                    if r == ReturnCode::NotInRange {
+                        creep.move_to(&site);
+                    } else if r != ReturnCode::Ok {
+                        warn!("couldn't upgrade: {:?}", r);
+                    } else {
+                        warn!("could not upgrade construction site: {:?}", r);
+                    }
+                }
+                None => warn!("could not find any construction sites"),
+            }
+        } else {
+            let source = creep.pos().find_closest_by_path(find::SOURCES_ACTIVE);
+            match source {
+                Some(source) => {
+                    if creep.pos().is_near_to(source.pos()) {
+                        let r = creep.harvest(&source);
+                        if r != ReturnCode::Ok {
+                            warn!("couldn't harvest: {:?}", r);
+                        }
+                    } else {
+                        creep.move_to(&source);
+                    }
+                }
+                None => warn!("could not find any active source"),
+            }
+        }
         return;
     }
     let name = creep.name();
