@@ -20,7 +20,9 @@ pub fn setup() {
 // this is one way to persist data between ticks within Rust's memory, as opposed to
 // keeping state in memory on game objects - but will be lost on global resets!
 thread_local! {
-    static CREEP_TARGETS: RefCell<HashMap<String, CreepTarget>> = RefCell::new(HashMap::new());
+    static CREEPS_TARGET: RefCell<HashMap<String, CreepTarget>> = RefCell::new(HashMap::new());
+    static CREEPS_MEMORY: RefCell<HashMap<String, CreepMemory>> = RefCell::new(HashMap::new());
+    static ROLES_NUM: RefCell<HashMap<Role, usize>> = RefCell::new(HashMap::new());
 }
 
 // this enum will represent a creep's lock on a specific target object, storing a js reference to the object id so that we can grab a fresh reference to the object each successive tick, since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
@@ -38,7 +40,7 @@ pub fn game_loop() {
     let mut db = Database::init().expect("could not init database");
     // mutably borrow the creep_targets refcell, which is holding our creep target locks
     // in the wasm heap
-    CREEP_TARGETS.with(|creep_targets_refcell| {
+    CREEPS_TARGET.with(|creep_targets_refcell| {
         let mut creep_targets = creep_targets_refcell.borrow_mut();
         debug!("running creeps");
         // same type conversion (and type assumption) as the spawn loop
@@ -74,14 +76,14 @@ pub fn game_loop() {
                 warn!("couldn't spawn: {:?}", res);
             } else {
                 additional += 1;
-                // match game::creeps().get(name.clone()) {
-                //     Some(c) => {
-
-                //     }
-                //     None => {
-                //         warn!("couldn't find creep with name: {:?}", name);
-                //     }
-                // }
+                match db.get_mut_creep_memory(name.as_str()) {
+                    Some(c) => {
+                        c.role = Some(Role::Harvester);
+                    }
+                    None => {
+                        warn!("couldn't find creep with name: {:?} in the database, perhaps need to wait for next tick?", name);
+                    }
+                }
             }
         }
     }
@@ -96,6 +98,7 @@ pub fn game_loop() {
     info!("done! cpu: {}", game::cpu::get_used())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 enum Role {
     Harvester,
     Upgrader,
@@ -116,8 +119,7 @@ struct Root {
 #[derive(Debug, Serialize, Deserialize)]
 struct CreepMemory {
     _move: Option<Move>,
-    is_manual: Option<bool>,
-    is_upgrader: Option<bool>,
+    role: Option<Role>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct Move {
@@ -274,10 +276,46 @@ impl Database {
             }
         }
     }
+
+    fn get_creep_memory(&self, name: &str) -> Option<&CreepMemory> {
+        self.data.creeps.get(name)
+    }
+
+    fn get_mut_creep_memory(&mut self, name: &str) -> Option<&mut CreepMemory> {
+        self.data.creeps.get_mut(name)
+    }
 }
 
 fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
     let creep = Creep { inner_creep: creep };
+    CREEPS_MEMORY.with(|creep_memory_refcell| {
+        let mut creeps_memory = creep_memory_refcell.borrow_mut();
+        let creep_memory = creeps_memory.get_mut(creep.name().as_str()).unwrap();
+        match creep_memory.role {
+            Some(_) => {}
+            None => {
+                ROLES_NUM.with(|roles_num_refcell| {
+                    let mut roles_num = roles_num_refcell.borrow_mut();
+                    let mut harvesters_total = 0;
+                    let mut upgrader_total = 0;
+                    let mut manual_total = 0;
+                    for (role, total) in roles_num.iter() {
+                        match role {
+                            Role::Harvester => harvesters_total = *total,
+                            Role::Upgrader => upgrader_total = *total,
+                            Role::Manual => manual_total = *total,
+                        }
+                    }
+
+                    if harvesters_total > upgrader_total {
+                        creep_memory.role = Some(Role::Harvester);
+                    } else {
+                        creep_memory.role = Some(Role::Upgrader);
+                    }
+                });
+            }
+        }
+    });
     if creep.spawning() {
         return;
     }
@@ -285,7 +323,7 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
         return;
     }
     if creep.is_upgrader_creep() {
-        if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+        if creep.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
             let site = creep.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
             match site {
                 Some(site) => {
