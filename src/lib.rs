@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 use log::*;
 use screeps::{
-    find, game, prelude::*, Creep, ObjectId, Part, RawMemory, ResourceType, ReturnCode,
-    RoomObjectProperties, Source, StructureController, StructureObject, StructureSpawn,
+    find, game, prelude::*, ConstructionSite, ObjectId, Part, RawMemory, ResourceType, ReturnCode,
+    Room, RoomObjectProperties, Source, StructureController, StructureObject, StructureSpawn,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -35,6 +35,7 @@ enum CreepTarget {
 #[wasm_bindgen(js_name = loop)]
 pub fn game_loop() {
     debug!("loop starting! CPU: {}", game::cpu::get_used());
+    let mut db = Database::init().expect("could not init database");
     // mutably borrow the creep_targets refcell, which is holding our creep target locks
     // in the wasm heap
     CREEP_TARGETS.with(|creep_targets_refcell| {
@@ -68,12 +69,19 @@ pub fn game_loop() {
             // creates Memory.creeps[creep_name] which will build up forever;
             // these memory entries should be prevented (todo doc link on how) or cleaned up
             let res = spawn.spawn_creep(&body, &name);
-
             // todo once fixed in branch this should be ReturnCode::Ok instead of this i8 grumble grumble
             if res != ReturnCode::Ok {
                 warn!("couldn't spawn: {:?}", res);
             } else {
                 additional += 1;
+                // match game::creeps().get(name.clone()) {
+                //     Some(c) => {
+
+                //     }
+                //     None => {
+                //         warn!("couldn't find creep with name: {:?}", name);
+                //     }
+                // }
             }
         }
     }
@@ -82,14 +90,28 @@ pub fn game_loop() {
 
     if time % 32 == 3 {
         info!("running memory cleanup");
-        clean_up();
+        // clean_up();
+        db.clean_up();
     }
     info!("done! cpu: {}", game::cpu::get_used())
+}
+
+enum Role {
+    Harvester,
+    Upgrader,
+    Manual,
+}
+
+impl Role {
+    fn give_a_role(creep: &mut screeps::Creep) {}
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Root {
     creeps: HashMap<String, CreepMemory>,
+    harvesters: Option<usize>,
+    upgraders: Option<usize>,
+    manuals: Option<usize>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct CreepMemory {
@@ -110,89 +132,159 @@ struct DestJson {
     y: u64,
     room: String,
 }
-fn clean_up() {
-    let root_json_string: String = RawMemory::get().into();
-    match serde_json::from_str(root_json_string.as_str()) {
-        Ok::<Root, _>(mut root_json) => {
-            info!("ROOT: {:?}", root_json);
-            let mut to_remove = Vec::<String>::new();
-            for (name, _) in root_json.creeps.iter() {
-                let mut remove = true;
-                for living_creep in game::creeps().values().into_iter() {
-                    if name == &living_creep.name() {
-                        remove = false;
-                        break;
-                    }
-                }
-                if remove {
-                    to_remove.push(name.clone());
-                }
-            }
-            if to_remove.len() > 0 {
-                info!("gonna remove {:?}", to_remove);
-            }
 
-            for name in to_remove.iter() {
-                let removed_creep_js = root_json.creeps.remove(name);
-                if let None = removed_creep_js {
-                    info!(
-                        "tried to remove inexistent creep in memory object, name: {}",
-                        name
-                    );
-                }
-            }
-            match serde_json::to_string(&root_json) {
-                Ok::<String, _>(root_json) => {
-                    RawMemory::set(&js_sys::JsString::from(root_json));
-                }
-                Err(e) => info!("could not serialize root_json: {}", e),
-            }
-        }
-        Err(e) => info!("could not deserialize root_json: {}", e),
-    }
+struct Database {
+    data: Root,
 }
 
-fn is_upgrader_creep(creep: &Creep) -> bool {
-    match js_sys::Reflect::get(&creep.memory(), &JsValue::from_str("is_upgrader")) {
-        Ok(val) => match val.as_bool() {
-            Some(v) => v,
+struct Creep<'a> {
+    inner_creep: &'a screeps::Creep,
+}
+impl<'a> Creep<'a> {
+    fn name(&self) -> String {
+        self.inner_creep.name()
+    }
+    fn spawning(&self) -> bool {
+        self.inner_creep.spawning()
+    }
+    fn store(&self) -> screeps::Store {
+        self.inner_creep.store()
+    }
+    fn pos(&self) -> screeps::Position {
+        self.inner_creep.pos()
+    }
+    fn build(&self, target: &ConstructionSite) -> ReturnCode {
+        self.inner_creep.build(target)
+    }
+    fn move_to<T>(&self, target: T) -> ReturnCode
+    where
+        T: HasPosition,
+    {
+        self.inner_creep.move_to(target)
+    }
+    pub fn harvest<T>(&self, target: &T) -> ReturnCode
+    where
+        T: ?Sized + Harvestable,
+    {
+        self.inner_creep.harvest(target)
+    }
+    pub fn upgrade_controller(&self, target: &StructureController) -> ReturnCode {
+        self.inner_creep.upgrade_controller(target)
+    }
+    fn transfer<T>(&self, target: &T, ty: ResourceType, amount: Option<u32>) -> ReturnCode
+    where
+        T: Transferable,
+    {
+        self.inner_creep.transfer(target, ty, amount)
+    }
+    fn room(&self) -> Option<Room> {
+        self.inner_creep.room()
+    }
+    fn is_upgrader_creep(&self) -> bool {
+        match js_sys::Reflect::get(
+            &self.inner_creep.memory(),
+            &JsValue::from_str("is_upgrader"),
+        ) {
+            Ok(val) => match val.as_bool() {
+                Some(v) => v,
 
-            None => {
-                debug!("could not find any boolean value inside");
+                None => {
+                    debug!("could not find any boolean value inside");
+                    false
+                }
+            },
+            Err(e) => {
+                warn!("could not deserialize creep memory, err: {:?}", e);
                 false
             }
-        },
-        Err(e) => {
-            warn!("could not deserialize creep memory, err: {:?}", e);
-            false
         }
     }
-}
-fn is_manual_creep(creep: &Creep) -> bool {
-    match js_sys::Reflect::get(&creep.memory(), &JsValue::from_str("is_manual")) {
-        Ok(val) => match val.as_bool() {
-            Some(v) => v,
+    fn is_manual_creep(&self) -> bool {
+        match js_sys::Reflect::get(&self.inner_creep.memory(), &JsValue::from_str("is_manual")) {
+            Ok(val) => match val.as_bool() {
+                Some(v) => v,
 
-            None => {
-                debug!("could not find any boolean value inside");
+                None => {
+                    debug!("could not find any boolean value inside");
+                    false
+                }
+            },
+            Err(e) => {
+                warn!("could not deserialize creep memory, err: {:?}", e);
                 false
             }
-        },
-        Err(e) => {
-            warn!("could not deserialize creep memory, err: {:?}", e);
-            false
         }
     }
 }
 
-fn run_creep(creep: &Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
+impl Database {
+    fn init() -> Option<Self> {
+        let root_json_string: String = RawMemory::get().into();
+        match serde_json::from_str(root_json_string.as_str()) {
+            Ok::<Root, _>(root_json) => {
+                info!("database init");
+                Some(Self { data: root_json })
+            }
+            Err(e) => {
+                info!("could not deserialize root_json: {}", e);
+                None
+            }
+        }
+    }
+
+    fn clean_up(&mut self) {
+        let mut to_remove = Vec::<String>::new();
+        for (name, _) in self.data.creeps.iter() {
+            let mut remove = true;
+            for living_creep in game::creeps().values().into_iter() {
+                if name == &living_creep.name() {
+                    remove = false;
+                    break;
+                }
+            }
+            if remove {
+                to_remove.push(name.clone());
+            }
+        }
+        if to_remove.len() > 0 {
+            info!("gonna remove {:?}", to_remove);
+        }
+
+        for name in to_remove.iter() {
+            let removed_creep_js = self.data.creeps.remove(name);
+            if let None = removed_creep_js {
+                info!(
+                    "tried to remove inexistent creep in memory object, name: {}",
+                    name
+                );
+            }
+        }
+
+        self.update_memory();
+    }
+
+    fn update_memory(&self) {
+        match serde_json::to_string(&self.data) {
+            Ok::<String, _>(root_json) => {
+                RawMemory::set(&js_sys::JsString::from(root_json));
+            }
+            Err(e) => {
+                info!("could not serialize root_json: {}", e);
+                info!("mutation did not persist to screeps memory");
+            }
+        }
+    }
+}
+
+fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
+    let creep = Creep { inner_creep: creep };
     if creep.spawning() {
         return;
     }
-    if is_manual_creep(creep) {
+    if creep.is_manual_creep() {
         return;
     }
-    if is_upgrader_creep(creep) {
+    if creep.is_upgrader_creep() {
         if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
             let site = creep.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
             match site {
@@ -203,7 +295,7 @@ fn run_creep(creep: &Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
                     } else if r != ReturnCode::Ok {
                         warn!("couldn't upgrade: {:?}", r);
                     } else {
-                        warn!("could not upgrade construction site: {:?}", r);
+                        creep.build(&site);
                     }
                 }
                 None => warn!("could not find any construction sites"),
