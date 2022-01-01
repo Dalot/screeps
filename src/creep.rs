@@ -1,11 +1,12 @@
+use crate::storage::*;
 use log::*;
 use screeps::{
-    find, game, prelude::*, ConstructionSite, ObjectId, OwnedStructureObject, Part, RawMemory,
-    ResourceType, ReturnCode, Room, RoomObject, RoomObjectProperties, Source, Structure,
-    StructureController, StructureExtension, StructureObject, StructureRoad, StructureSpawn,
-    StructureType,
+    find, prelude::*, ConstructionSite, ObjectId, ResourceType, ReturnCode, Room, RoomObject,
+    RoomObjectProperties, StructureController, StructureExtension, StructureObject, StructureType,
 };
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+
 pub struct Creep<'a> {
     inner_creep: &'a screeps::Creep,
 }
@@ -137,6 +138,279 @@ impl<'a> Creep<'a> {
             }
         }
         None
+    }
+    pub fn run_creep(&self, creep_targets: &mut HashMap<String, CreepTarget>) {
+        let name = self.name();
+        if self.spawning() {
+            return;
+        }
+
+        let target = creep_targets.get(&name);
+        match target {
+            Some(creep_target) => {
+                match &creep_target {
+                    CreepTarget::UpgradeController(controller_id) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            match controller_id.resolve() {
+                                Some(controller) => {
+                                    let r = self.upgrade_controller(&controller);
+                                    if r == ReturnCode::NotInRange {
+                                        self.move_to(&controller);
+                                    } else if r != ReturnCode::Ok {
+                                        warn!("(upgrade controller)couldn't upgrade: {:?}", r);
+                                        creep_targets.remove(&name);
+                                    }
+                                }
+                                None => warn!("couldn't file controller with id {}", controller_id),
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                            // HARVEST random energy source
+                            if let Some(source_id) = self.pick_random_energy_source() {
+                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                            } else {
+                                warn!("could not find source with id");
+                            }
+                        }
+                    }
+                    CreepTarget::Harvest(source_id) => {
+                        if self.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
+                            match source_id.resolve() {
+                                Some(source) => {
+                                    if self.pos().is_near_to(source.pos()) {
+                                        let r = self.harvest(&source);
+                                        if r != ReturnCode::Ok {
+                                            warn!("couldn't harvest: {:?}", r);
+                                        }
+                                    } else {
+                                        self.move_to(&source);
+                                    }
+                                }
+                                None => warn!("couldn't file controller with id {}", source_id),
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                        }
+                    }
+                    CreepTarget::DepositSpawn(spawn_id) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            match spawn_id.resolve() {
+                                Some(spawn) => {
+                                    if self.pos().is_near_to(spawn.pos()) {
+                                        let value_to_transfer =
+                                            self.get_value_to_transfer(&spawn.store());
+                                        let r = self.transfer(
+                                            &spawn,
+                                            ResourceType::Energy,
+                                            Some(value_to_transfer),
+                                        );
+                                        if r == ReturnCode::Full {
+                                            info!(
+                                                "spawn {} is FULL, will do something else",
+                                                spawn_id
+                                            );
+                                            creep_targets.remove(&name);
+                                        } else if r != ReturnCode::Ok {
+                                            warn!(
+                                            "could not make a transfer from creep {}, to spawn {} code: {:?}",
+                                            self.name(),
+                                            spawn_id,
+                                            r
+                                        );
+                                            creep_targets.remove(&name);
+                                        }
+                                    } else {
+                                        let r = self.move_to(&spawn);
+                                        if r != ReturnCode::Ok {
+                                            warn!(
+                                                "could not move to spawn with id {} code: {:?}",
+                                                spawn_id, r
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    warn!("could not resolve spawn with id {}", spawn_id);
+                                }
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                        }
+                    }
+                    CreepTarget::DepositExtension(ext) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            if self.pos().is_near_to(ext.pos()) {
+                                let value_to_transfer = self.get_value_to_transfer(&ext.store());
+                                let r = self.transfer(
+                                    ext,
+                                    ResourceType::Energy,
+                                    Some(value_to_transfer),
+                                );
+                                if r == ReturnCode::Ok {
+                                    creep_targets.remove(&name);
+                                    if self.store().get_used_capacity(Some(ResourceType::Energy))
+                                        > 0
+                                    {
+                                        if let Some(ext) = self.find_unfilled_extension() {
+                                            creep_targets.insert(
+                                                self.name(),
+                                                CreepTarget::DepositExtension(ext),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                            "could not make a transfer from creep {}, to extension {} code: {:?}",
+                                            self.name(),
+                                            ext.id(),
+                                            r
+                                        );
+                                    creep_targets.remove(&name);
+                                }
+                            } else {
+                                let r = self.move_to(&ext);
+                                if r != ReturnCode::Ok {
+                                    warn!(
+                                        "could not move to spawn with id {}, code: {:?}",
+                                        ext.id(),
+                                        r
+                                    );
+                                }
+                            }
+                            // warn!("could not resolve spawn with id {}", ext_id);
+                        } else {
+                            creep_targets.remove(&name);
+                        }
+                    }
+                    CreepTarget::UpgradeConstructionSite(site) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            let r = self.build(&site);
+                            if r == ReturnCode::NotInRange {
+                                self.move_to(&site);
+                            } else if r != ReturnCode::Ok {
+                                warn!("(upgrade site) couldn't upgrade: {:?}", r);
+                                creep_targets.remove(&name);
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                            // HARVEST random energy source
+                            if let Some(source_id) = self.pick_random_energy_source() {
+                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                            } else {
+                                warn!("could not find source with id");
+                            }
+                        }
+                    }
+                    CreepTarget::RepairRoad(road_id) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            let target = road_id.resolve().unwrap();
+                            if target.hits() == target.hits_max() {
+                                creep_targets.remove(&name);
+                            }
+                            let r = self.repair(&target);
+                            if r == ReturnCode::NotInRange {
+                                self.move_to(&target);
+                            } else if r != ReturnCode::Ok {
+                                warn!("could not repair road code: {:?}", r);
+                                creep_targets.remove(&name);
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                            // HARVEST random energy source
+                            if let Some(source_id) = self.pick_random_energy_source() {
+                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                            } else {
+                                warn!("could not find source with id");
+                            }
+                        }
+                    }
+                };
+            }
+            None => {
+                // no target, let's find one depending on if we have energy
+                let room = self.room().expect("couldn't resolve creep room");
+                if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                    // Upgrade controller, build shit or deposit in a spawn or extension
+                    let max_actions = 6;
+                    let rnd_number = rnd_source_idx(max_actions);
+                    if rnd_number < 1 {
+                        // Upgrade Controller
+                        for structure in room.find(find::STRUCTURES).iter() {
+                            if let StructureObject::StructureController(controller) = structure {
+                                creep_targets
+                                    .insert(name, CreepTarget::UpgradeController(controller.id()));
+                                break;
+                            }
+                        }
+                        return;
+                    } else if rnd_number < 4 {
+                        // Deposit to spawn
+                        for s in room.find(find::MY_SPAWNS).iter() {
+                            if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
+                                break;
+                            }
+                            creep_targets.insert(self.name(), CreepTarget::DepositSpawn(s.id()));
+                            return;
+                        }
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            if let Some(ext) = self.find_unfilled_extension() {
+                                creep_targets
+                                    .insert(self.name(), CreepTarget::DepositExtension(ext));
+                            }
+                        }
+                    } else {
+                        // Upgrade EXTENSION
+                        for site in room.find(find::CONSTRUCTION_SITES).iter() {
+                            if site.structure_type() == StructureType::Extension {
+                                creep_targets.insert(
+                                    name,
+                                    CreepTarget::UpgradeConstructionSite(site.clone()),
+                                );
+                                return;
+                            }
+                        }
+                        // Upgrade RANDOM CONSTRUCTION SITE
+                        let site = self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
+                        match site {
+                            Some(site) => {
+                                creep_targets
+                                    .insert(name, CreepTarget::UpgradeConstructionSite(site));
+                                return;
+                            }
+                            _ => {}
+                        }
+                        // REPAIR ROADS
+                        let objects =
+                            self.pos()
+                                .find_closest_by_path(find::STRUCTURES)
+                                .filter(|r| {
+                                    r.structure_type() == StructureType::Road
+                                        && r.as_attackable().unwrap().hits()
+                                            > r.as_attackable().unwrap().hits_max() / 3
+                                });
+                        if objects.is_none() {
+                            return;
+                        }
+                        for object in objects.iter() {
+                            match object {
+                                StructureObject::StructureRoad(road) => {
+                                    creep_targets
+                                        .insert(name.clone(), CreepTarget::RepairRoad(road.id()));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                } else {
+                    // HARVEST random energy source
+                    if let Some(source_id) = self.pick_random_energy_source() {
+                        creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                    } else {
+                        warn!("could not find source with id");
+                    }
+                }
+            }
+        }
     }
 }
 /// max is exclusive, i.e for max = 10, [0,10[
