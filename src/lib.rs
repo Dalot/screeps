@@ -1,15 +1,18 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use creep::*;
 use log::*;
 use screeps::{
     find, game, prelude::*, ConstructionSite, ObjectId, OwnedStructureObject, Part, RawMemory,
-    ResourceType, ReturnCode, Room, RoomObjectProperties, Source, Structure, StructureController,
-    StructureExtension, StructureObject, StructureSpawn, StructureType,
+    ResourceType, ReturnCode, Room, RoomObject, RoomObjectProperties, Source, Structure,
+    StructureController, StructureExtension, StructureObject, StructureRoad, StructureSpawn,
+    StructureType,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+mod creep;
 mod logging;
 
 // add wasm_bindgen to any function you would like to expose for call from js
@@ -29,8 +32,8 @@ thread_local! {
 #[derive(Clone)]
 enum CreepTarget {
     UpgradeController(ObjectId<StructureController>),
-    Upgrade(ObjectId<StructureController>), //TODO: delete this after migration
     UpgradeConstructionSite(ConstructionSite),
+    RepairRoad(ObjectId<StructureRoad>),
     Harvest(ObjectId<Source>),
     DepositExtension(StructureExtension),
     DepositSpawn(ObjectId<StructureSpawn>),
@@ -104,7 +107,14 @@ pub fn game_loop() {
     for spawn in game::spawns().values() {
         debug!("running spawn {}", String::from(spawn.name()));
 
-        let body = [Part::Move, Part::Move, Part::Carry, Part::Work, Part::Work];
+        let body = [
+            Part::Move,
+            Part::Move,
+            Part::Carry,
+            Part::Carry,
+            Part::Work,
+            Part::Work,
+        ];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
             // create a unique name, spawn.
             let name_base = game::time();
@@ -160,100 +170,6 @@ struct DestJson {
 
 struct Database {
     data: Root,
-}
-
-struct Creep<'a> {
-    inner_creep: &'a screeps::Creep,
-}
-impl<'a> Creep<'a> {
-    fn name(&self) -> String {
-        self.inner_creep.name()
-    }
-    fn spawning(&self) -> bool {
-        self.inner_creep.spawning()
-    }
-    fn store(&self) -> screeps::Store {
-        self.inner_creep.store()
-    }
-    fn pos(&self) -> screeps::Position {
-        self.inner_creep.pos()
-    }
-    fn build(&self, target: &ConstructionSite) -> ReturnCode {
-        self.inner_creep.build(target)
-    }
-    fn move_to<T>(&self, target: T) -> ReturnCode
-    where
-        T: HasPosition,
-    {
-        self.inner_creep.move_to(target)
-    }
-    pub fn harvest<T>(&self, target: &T) -> ReturnCode
-    where
-        T: ?Sized + Harvestable,
-    {
-        self.inner_creep.harvest(target)
-    }
-    pub fn upgrade_controller(&self, target: &StructureController) -> ReturnCode {
-        self.inner_creep.upgrade_controller(target)
-    }
-    fn transfer<T>(&self, target: &T, ty: ResourceType, amount: Option<u32>) -> ReturnCode
-    where
-        T: Transferable,
-    {
-        self.inner_creep.transfer(target, ty, amount)
-    }
-    fn room(&self) -> Option<Room> {
-        self.inner_creep.room()
-    }
-    fn is_upgrader_creep(&self) -> bool {
-        match js_sys::Reflect::get(
-            &self.inner_creep.memory(),
-            &JsValue::from_str("is_upgrader"),
-        ) {
-            Ok(val) => match val.as_bool() {
-                Some(v) => v,
-
-                None => {
-                    debug!("could not find any boolean value inside");
-                    false
-                }
-            },
-            Err(e) => {
-                warn!("could not deserialize creep memory, err: {:?}", e);
-                false
-            }
-        }
-    }
-    fn is_manual_creep(&self) -> bool {
-        match js_sys::Reflect::get(&self.inner_creep.memory(), &JsValue::from_str("is_manual")) {
-            Ok(val) => match val.as_bool() {
-                Some(v) => v,
-
-                None => {
-                    debug!("could not find any boolean value inside");
-                    false
-                }
-            },
-            Err(e) => {
-                warn!("could not deserialize creep memory, err: {:?}", e);
-                false
-            }
-        }
-    }
-    fn pick_random_energy_source(&self) -> Option<ObjectId<screeps::Source>> {
-        // let's pick a random energy source
-        let room = self
-            .inner_creep
-            .room()
-            .expect("couldn't resolve creep room");
-        let sources = room.find(find::SOURCES_ACTIVE);
-        let rnd_number = rnd_source_idx(sources.len());
-
-        if let Some(source) = sources.get(rnd_number) {
-            return Some(source.id());
-        }
-        None
-    }
 }
 
 impl Database {
@@ -324,7 +240,7 @@ impl Database {
 }
 
 fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTarget>) {
-    let creep = Creep { inner_creep: creep };
+    let creep = Creep::new(creep);
     let name = creep.name();
     if creep.spawning() {
         return;
@@ -382,17 +298,8 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                         match spawn_id.resolve() {
                             Some(spawn) => {
                                 if creep.pos().is_near_to(spawn.pos()) {
-                                    let mut value_to_transfer =
-                                        creep.store().get_used_capacity(Some(ResourceType::Energy));
-                                    let target_free_store: u32 = spawn
-                                        .store()
-                                        .get_free_capacity(Some(ResourceType::Energy))
-                                        .try_into()
-                                        .expect("could not convert i32 to u32");
-
-                                    if target_free_store < value_to_transfer {
-                                        value_to_transfer = target_free_store;
-                                    }
+                                    let value_to_transfer =
+                                        creep.get_value_to_transfer(&spawn.store());
                                     let r = creep.transfer(
                                         &spawn,
                                         ResourceType::Energy,
@@ -431,20 +338,20 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                 CreepTarget::DepositExtension(ext) => {
                     if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                         if creep.pos().is_near_to(ext.pos()) {
-                            let mut value_to_transfer =
-                                creep.store().get_used_capacity(Some(ResourceType::Energy));
-                            let target_free_store: u32 = ext
-                                .store()
-                                .get_free_capacity(Some(ResourceType::Energy))
-                                .try_into()
-                                .expect("could not convert i32 to u32");
-
-                            if target_free_store < value_to_transfer {
-                                value_to_transfer = target_free_store;
-                            }
+                            let value_to_transfer = creep.get_value_to_transfer(&ext.store());
                             let r =
                                 creep.transfer(ext, ResourceType::Energy, Some(value_to_transfer));
-                            if r != ReturnCode::Ok {
+                            if r == ReturnCode::Ok {
+                                creep_targets.remove(&name);
+                                if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                                    if let Some(ext) = creep.find_unfilled_extension() {
+                                        creep_targets.insert(
+                                            creep.name(),
+                                            CreepTarget::DepositExtension(ext),
+                                        );
+                                    }
+                                }
+                            } else {
                                 warn!(
                                             "could not make a transfer from creep {}, to extension {} code: {:?}",
                                             creep.name(),
@@ -476,8 +383,6 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                         } else if r != ReturnCode::Ok {
                             warn!("(upgrade site) couldn't upgrade: {:?}", r);
                             creep_targets.remove(&name);
-                        } else {
-                            creep.build(&site);
                         }
                     } else {
                         creep_targets.remove(&name);
@@ -489,8 +394,28 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                         }
                     }
                 }
-                CreepTarget::Upgrade(_) => {
-                    creep_targets.remove(&name);
+                CreepTarget::RepairRoad(road_id) => {
+                    if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                        let target = road_id.resolve().unwrap();
+                        if target.hits() == target.hits_max() {
+                            creep_targets.remove(&name);
+                        }
+                        let r = creep.repair(&target);
+                        if r == ReturnCode::NotInRange {
+                            creep.move_to(&target);
+                        } else if r != ReturnCode::Ok {
+                            warn!("could not repair road code: {:?}", r);
+                            creep_targets.remove(&name);
+                        }
+                    } else {
+                        creep_targets.remove(&name);
+                        // HARVEST random energy source
+                        if let Some(source_id) = creep.pick_random_energy_source() {
+                            creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                        } else {
+                            warn!("could not find source with id");
+                        }
+                    }
                 }
             };
         }
@@ -498,7 +423,8 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
             // no target, let's find one depending on if we have energy
             let room = creep.room().expect("couldn't resolve creep room");
             if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                let max_actions = 3;
+                // Upgrade controller, build shit or deposit in a spawn or extension
+                let max_actions = 6;
                 let rnd_number = rnd_source_idx(max_actions);
                 if rnd_number < 1 {
                     // Upgrade Controller
@@ -510,25 +436,19 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                         }
                     }
                     return;
-                } else if rnd_number < 2 {
-                    for s in room.find(find::MY_STRUCTURES).iter() {
-                        match s {
-                            StructureObject::StructureExtension(val) => {
-                                // TODO: creep may have more than 50 energy
-                                if val.store().get_free_capacity(Some(ResourceType::Energy)) >= 50 {
-                                    creep_targets.insert(
-                                        creep.name(),
-                                        CreepTarget::DepositExtension(val.clone()),
-                                    );
-                                    return;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                } else if rnd_number < 4 {
                     // Deposit to spawn
                     for s in room.find(find::MY_SPAWNS).iter() {
+                        if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
+                            break;
+                        }
                         creep_targets.insert(creep.name(), CreepTarget::DepositSpawn(s.id()));
+                        return;
+                    }
+                    if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                        if let Some(ext) = creep.find_unfilled_extension() {
+                            creep_targets.insert(creep.name(), CreepTarget::DepositExtension(ext));
+                        }
                     }
                 } else {
                     // Upgrade EXTENSION
@@ -544,8 +464,30 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                     match site {
                         Some(site) => {
                             creep_targets.insert(name, CreepTarget::UpgradeConstructionSite(site));
+                            return;
                         }
-                        None => warn!("could not find any construction sites"),
+                        _ => {}
+                    }
+                    // REPAIR ROADS
+                    let objects = creep
+                        .pos()
+                        .find_closest_by_path(find::STRUCTURES)
+                        .filter(|r| {
+                            r.structure_type() == StructureType::Road
+                                && r.as_attackable().unwrap().hits()
+                                    > r.as_attackable().unwrap().hits_max() / 3
+                        });
+                    if objects.is_none() {
+                        return;
+                    }
+                    for object in objects.iter() {
+                        match object {
+                            StructureObject::StructureRoad(road) => {
+                                creep_targets
+                                    .insert(name.clone(), CreepTarget::RepairRoad(road.id()));
+                            }
+                            _ => {}
+                        }
                     }
                 }
             } else {
