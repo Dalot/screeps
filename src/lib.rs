@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use log::*;
 use screeps::{
-    find, game, prelude::*, ConstructionSite, ObjectId, Part, RawMemory, ResourceType, ReturnCode,
-    Room, RoomObjectProperties, Source, StructureController, StructureExtension, StructureObject,
-    StructureSpawn, StructureType,
+    find, game, prelude::*, ConstructionSite, ObjectId, OwnedStructureObject, Part, RawMemory,
+    ResourceType, ReturnCode, Room, RoomObjectProperties, Source, Structure, StructureController,
+    StructureExtension, StructureObject, StructureSpawn, StructureType,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -32,7 +32,8 @@ enum CreepTarget {
     Upgrade(ObjectId<StructureController>), //TODO: delete this after migration
     UpgradeConstructionSite(ConstructionSite),
     Harvest(ObjectId<Source>),
-    Deposit(ObjectId<StructureSpawn>),
+    DepositExtension(StructureExtension),
+    DepositSpawn(ObjectId<StructureSpawn>),
 }
 
 #[derive(Default)]
@@ -103,7 +104,7 @@ pub fn game_loop() {
     for spawn in game::spawns().values() {
         debug!("running spawn {}", String::from(spawn.name()));
 
-        let body = [Part::Move, Part::Move, Part::Carry, Part::Carry, Part::Work];
+        let body = [Part::Move, Part::Move, Part::Carry, Part::Work, Part::Work];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
             // create a unique name, spawn.
             let name_base = game::time();
@@ -376,32 +377,46 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                         creep_targets.remove(&name);
                     }
                 }
-                CreepTarget::Deposit(spawn_id) => {
+                CreepTarget::DepositSpawn(spawn_id) => {
                     if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                         match spawn_id.resolve() {
                             Some(spawn) => {
                                 if creep.pos().is_near_to(spawn.pos()) {
+                                    let mut value_to_transfer =
+                                        creep.store().get_used_capacity(Some(ResourceType::Energy));
+                                    let target_free_store: u32 = spawn
+                                        .store()
+                                        .get_free_capacity(Some(ResourceType::Energy))
+                                        .try_into()
+                                        .expect("could not convert i32 to u32");
+
+                                    if target_free_store < value_to_transfer {
+                                        value_to_transfer = target_free_store;
+                                    }
                                     let r = creep.transfer(
                                         &spawn,
                                         ResourceType::Energy,
-                                        Some(
-                                            creep
-                                                .store()
-                                                .get_used_capacity(Some(ResourceType::Energy)),
-                                        ),
+                                        Some(value_to_transfer),
                                     );
-                                    if r != ReturnCode::Ok {
+                                    if r == ReturnCode::Full {
+                                        info!("spawn {} is FULL, will do something else", spawn_id);
+                                        creep_targets.remove(&name);
+                                    } else if r != ReturnCode::Ok {
                                         warn!(
                                             "could not make a transfer from creep {}, to spawn {} code: {:?}",
                                             creep.name(),
-                                            spawn.name(),
+                                            spawn_id,
                                             r
                                         );
+                                        creep_targets.remove(&name);
                                     }
                                 } else {
                                     let r = creep.move_to(&spawn);
                                     if r != ReturnCode::Ok {
-                                        warn!("could not move to spawn with id {}", spawn_id);
+                                        warn!(
+                                            "could not move to spawn with id {} code: {:?}",
+                                            spawn_id, r
+                                        );
                                     }
                                 }
                             }
@@ -409,6 +424,46 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                                 warn!("could not resolve spawn with id {}", spawn_id);
                             }
                         }
+                    } else {
+                        creep_targets.remove(&name);
+                    }
+                }
+                CreepTarget::DepositExtension(ext) => {
+                    if creep.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                        if creep.pos().is_near_to(ext.pos()) {
+                            let mut value_to_transfer =
+                                creep.store().get_used_capacity(Some(ResourceType::Energy));
+                            let target_free_store: u32 = ext
+                                .store()
+                                .get_free_capacity(Some(ResourceType::Energy))
+                                .try_into()
+                                .expect("could not convert i32 to u32");
+
+                            if target_free_store < value_to_transfer {
+                                value_to_transfer = target_free_store;
+                            }
+                            let r =
+                                creep.transfer(ext, ResourceType::Energy, Some(value_to_transfer));
+                            if r != ReturnCode::Ok {
+                                warn!(
+                                            "could not make a transfer from creep {}, to extension {} code: {:?}",
+                                            creep.name(),
+                                            ext.id(),
+                                            r
+                                        );
+                                creep_targets.remove(&name);
+                            }
+                        } else {
+                            let r = creep.move_to(&ext);
+                            if r != ReturnCode::Ok {
+                                warn!(
+                                    "could not move to spawn with id {}, code: {:?}",
+                                    ext.id(),
+                                    r
+                                );
+                            }
+                        }
+                        // warn!("could not resolve spawn with id {}", ext_id);
                     } else {
                         creep_targets.remove(&name);
                     }
@@ -456,9 +511,24 @@ fn run_creep(creep: &screeps::Creep, creep_targets: &mut HashMap<String, CreepTa
                     }
                     return;
                 } else if rnd_number < 2 {
+                    for s in room.find(find::MY_STRUCTURES).iter() {
+                        match s {
+                            StructureObject::StructureExtension(val) => {
+                                // TODO: creep may have more than 50 energy
+                                if val.store().get_free_capacity(Some(ResourceType::Energy)) >= 50 {
+                                    creep_targets.insert(
+                                        creep.name(),
+                                        CreepTarget::DepositExtension(val.clone()),
+                                    );
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     // Deposit to spawn
                     for s in room.find(find::MY_SPAWNS).iter() {
-                        creep_targets.insert(creep.name(), CreepTarget::Deposit(s.id()));
+                        creep_targets.insert(creep.name(), CreepTarget::DepositSpawn(s.id()));
                     }
                 } else {
                     // Upgrade EXTENSION
