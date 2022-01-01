@@ -2,7 +2,8 @@ use crate::storage::*;
 use log::*;
 use screeps::{
     find, prelude::*, ConstructionSite, ObjectId, ResourceType, ReturnCode, Room, RoomObject,
-    RoomObjectProperties, StructureController, StructureExtension, StructureObject, StructureType,
+    RoomObjectProperties, Source, StructureController, StructureExtension, StructureObject,
+    StructureType,
 };
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -55,41 +56,6 @@ impl<'a> Creep<'a> {
     }
     pub fn room(&self) -> Option<Room> {
         self.inner_creep.room()
-    }
-    pub fn is_upgrader_creep(&self) -> bool {
-        match js_sys::Reflect::get(
-            &self.inner_creep.memory(),
-            &JsValue::from_str("is_upgrader"),
-        ) {
-            Ok(val) => match val.as_bool() {
-                Some(v) => v,
-
-                None => {
-                    debug!("could not find any boolean value inside");
-                    false
-                }
-            },
-            Err(e) => {
-                warn!("could not deserialize creep memory, err: {:?}", e);
-                false
-            }
-        }
-    }
-    pub fn is_manual_creep(&self) -> bool {
-        match js_sys::Reflect::get(&self.inner_creep.memory(), &JsValue::from_str("is_manual")) {
-            Ok(val) => match val.as_bool() {
-                Some(v) => v,
-
-                None => {
-                    debug!("could not find any boolean value inside");
-                    false
-                }
-            },
-            Err(e) => {
-                warn!("could not deserialize creep memory, err: {:?}", e);
-                false
-            }
-        }
     }
     pub fn pick_random_energy_source(&self) -> Option<ObjectId<screeps::Source>> {
         // let's pick a random energy source
@@ -144,6 +110,7 @@ impl<'a> Creep<'a> {
         if self.spawning() {
             return;
         }
+        let room = self.room().unwrap();
 
         let target = creep_targets.get(&name);
         match target {
@@ -324,6 +291,60 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
+                    CreepTarget::Harvester(source_id, object) => {
+                        let harvester = Harvester { creep: self };
+                        if self.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
+                            if source_id.is_none() {
+                                // FIND A SOURCE TO HARVEST
+                                if let Some(source_id) = self.pick_random_energy_source() {
+                                    creep_targets.insert(
+                                        name,
+                                        CreepTarget::Harvester(Some(source_id), None),
+                                    );
+                                    return;
+                                } else {
+                                    warn!("could not find source with id");
+                                }
+                            } else {
+                                // HARVEST THE SOURCE
+                                if !harvester.harvest(source_id.unwrap()) {
+                                    warn!("could not resolve source_id");
+                                }
+                            }
+                        } else {
+                            // DEPOSIT
+                            if object.is_none() {
+                                // Find a spawn or an extension
+                                if let Some(deposit) = harvester.find_deposit() {
+                                    creep_targets
+                                        .insert(name, CreepTarget::Harvester(None, Some(deposit)));
+                                    return;
+                                } else {
+                                    warn!("could not find a deposit");
+                                    return;
+                                }
+                            } else {
+                                // Actually deposit
+                                match object.clone().unwrap() {
+                                    StructureObject::StructureExtension(ext) => {
+                                        if !harvester.deposit(ext) {
+                                            creep_targets
+                                                .insert(name, CreepTarget::Harvester(None, None));
+                                        }
+                                    }
+                                    StructureObject::StructureSpawn(spawn) => {
+                                        if !harvester.deposit(spawn) {
+                                            creep_targets
+                                                .insert(name, CreepTarget::Harvester(None, None));
+                                        }
+                                    }
+                                    _ => {
+                                        warn!("was expecting a spawn or an extension, received something else");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 };
             }
             None => {
@@ -331,7 +352,7 @@ impl<'a> Creep<'a> {
                 let room = self.room().expect("couldn't resolve creep room");
                 if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                     // Upgrade controller, build shit or deposit in a spawn or extension
-                    let max_actions = 6;
+                    let max_actions = 4;
                     let rnd_number = rnd_source_idx(max_actions);
                     if rnd_number < 1 {
                         // Upgrade Controller
@@ -343,7 +364,7 @@ impl<'a> Creep<'a> {
                             }
                         }
                         return;
-                    } else if rnd_number < 4 {
+                    } else if rnd_number < 2 {
                         // Deposit to spawn
                         for s in room.find(find::MY_SPAWNS).iter() {
                             if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
@@ -416,4 +437,79 @@ impl<'a> Creep<'a> {
 /// max is exclusive, i.e for max = 10, [0,10[
 fn rnd_source_idx(max: usize) -> usize {
     js_sys::Math::floor(js_sys::Math::random() * max as f64) as usize
+}
+
+struct Harvester<'a> {
+    pub creep: &'a Creep<'a>,
+}
+impl<'a> Harvester<'a> {
+    pub fn harvest(&self, source_id: ObjectId<Source>) -> bool {
+        return match source_id.resolve() {
+            Some(source) => {
+                if self.creep.pos().is_near_to(source.pos()) {
+                    let r = self.creep.harvest(&source);
+                    if r != ReturnCode::Ok {
+                        warn!("couldn't harvest: {:?}", r);
+                    }
+                    true
+                } else {
+                    self.creep.move_to(&source);
+                    true
+                }
+            }
+            None => false,
+        };
+    }
+
+    pub fn find_deposit(&self) -> Option<StructureObject> {
+        let room = self.creep.room().unwrap();
+        for s in room.find(find::MY_SPAWNS).iter() {
+            if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
+                break;
+            }
+            return Some(StructureObject::StructureSpawn(s.clone()));
+        }
+        if let Some(ext) = self.creep.find_unfilled_extension() {
+            Some(StructureObject::StructureExtension(ext))
+        } else {
+            None
+        }
+    }
+
+    /// Can return false when it's not done with deposit everything
+    /// or because it failed for some reason which should be logged
+    pub fn deposit<T>(&self, target: T) -> bool
+    where
+        T: Transferable + HasStore + HasId,
+    {
+        if self.creep.pos().is_near_to(target.pos()) {
+            let value_to_transfer = self.creep.get_value_to_transfer(&target.store());
+            let r = self
+                .creep
+                .transfer(&target, ResourceType::Energy, Some(value_to_transfer));
+            if r == ReturnCode::Ok {
+                false
+            } else {
+                warn!(
+                    "could not make a transfer from creep {}, to extension {} code: {:?}",
+                    self.creep.name(),
+                    target.id(),
+                    r
+                );
+                false
+            }
+        } else {
+            let r = self.creep.move_to(&target);
+            if r != ReturnCode::Ok {
+                warn!(
+                    "could not move to spawn with id {}, code: {:?}",
+                    target.id(),
+                    r
+                );
+                false
+            } else {
+                true
+            }
+        }
+    }
 }

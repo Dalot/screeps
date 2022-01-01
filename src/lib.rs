@@ -22,7 +22,6 @@ pub fn setup() {
 #[wasm_bindgen(js_name = loop)]
 pub fn game_loop() {
     debug!("loop starting! CPU: {}", game::cpu::get_used());
-    let mut db = Database::init().expect("could not init database");
     let mut harvest_sources = HashMap::<ObjectId<Source>, (usize, String)>::new();
     // mutably borrow the creep_targets refcell, which is holding our creep target locks
     // in the wasm heap
@@ -80,23 +79,20 @@ pub fn game_loop() {
         debug!("running spawn {}", String::from(spawn.name()));
 
         let body = [
-            Part::Move,
-            Part::Move,
-            Part::Move,
             Part::Carry,
             Part::Carry,
             Part::Work,
             Part::Work,
+            Part::Work,
+            Part::Move,
+            Part::Move,
+            Part::Move,
+            Part::Move,
         ];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
-            // create a unique name, spawn.
             let name_base = game::time();
             let name = format!("{}-{}", name_base, additional);
-            // note that this bot has a fatal flaw; spawning a creep
-            // creates Memory.creeps[creep_name] which will build up forever;
-            // these memory entries should be prevented (todo doc link on how) or cleaned up
             let res = spawn.spawn_creep(&body, &name);
-            // todo once fixed in branch this should be ReturnCode::Ok instead of this i8 grumble grumble
             if res != ReturnCode::Ok {
                 warn!("couldn't spawn: {:?}", res);
             } else {
@@ -108,8 +104,8 @@ pub fn game_loop() {
     let time = screeps::game::time();
 
     if time % 32 == 3 {
+        let mut db = Database::init().expect("could not init database");
         info!("running memory cleanup");
-        // clean_up();
         db.clean_up();
     }
     info!("done! cpu: {}", game::cpu::get_used())
@@ -123,10 +119,7 @@ impl Database {
     fn init() -> Option<Self> {
         let root_json_string: String = RawMemory::get().into();
         match serde_json::from_str(root_json_string.as_str()) {
-            Ok::<Root, _>(root_json) => {
-                info!("database init");
-                Some(Self { data: root_json })
-            }
+            Ok::<Root, _>(root_json) => Some(Self { data: root_json }),
             Err(e) => {
                 info!("could not deserialize root_json: {}", e);
                 None
