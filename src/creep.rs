@@ -369,6 +369,9 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
+                    _ => {
+                        creep_targets.remove(&name);
+                    }
                 };
             }
             None => {
