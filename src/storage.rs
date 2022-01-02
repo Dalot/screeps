@@ -23,7 +23,7 @@ pub enum CreepTarget {
     DepositExtension(StructureExtension),
     DepositSpawn(ObjectId<StructureSpawn>),
     Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
-    Repair(ObjectId<Structure>),
+    Repair(Structure),
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Root {

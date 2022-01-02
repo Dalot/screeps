@@ -349,22 +349,15 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
-                    CreepTarget::Repair(object_id) => {
+                    CreepTarget::Repair(object) => {
                         if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                            match object_id.resolve() {
-                                Some(structure) => {
-                                    let r = self.repair(&structure);
-                                    if r == ReturnCode::NotInRange {
-                                        self.move_to(&structure);
-                                    } else if r != ReturnCode::Ok {
-                                        warn!("couldn't repair: {:?}", r);
-                                        self.say("CANNOT REP", false);
-                                        creep_targets.remove(&name);
-                                    }
-                                }
-                                None => {
-                                    creep_targets.remove(&name);
-                                }
+                            let r = self.repair(&object);
+                            if r == ReturnCode::NotInRange {
+                                self.move_to(&object);
+                            } else if r != ReturnCode::Ok {
+                                warn!("couldn't repair: {:?}", r);
+                                self.say("CANNOT REP", false);
+                                creep_targets.remove(&name);
                             }
                         } else {
                             creep_targets.remove(&name);
@@ -426,7 +419,7 @@ impl<'a> Creep<'a> {
                                 obj => {
                                     creep_targets.insert(
                                         name.clone(),
-                                        CreepTarget::Repair(obj.as_structure().id()),
+                                        CreepTarget::Repair(obj.as_structure().clone()),
                                     );
                                     return;
                                 }
