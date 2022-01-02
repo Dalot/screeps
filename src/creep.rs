@@ -398,7 +398,7 @@ impl<'a> Creep<'a> {
                             }
                         }
                         return;
-                    } else if rnd_number < 5 {
+                    } else if rnd_number < 4 {
                         // Deposit to spawn
                         for s in room.find(find::MY_SPAWNS).iter() {
                             if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
