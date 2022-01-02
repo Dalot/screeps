@@ -58,7 +58,11 @@ pub fn game_loop() {
                 let sources = room.find(find::SOURCES_ACTIVE);
                 for source in sources.iter() {
                     if source.id() != *object_id {
-                        creep_targets.remove(&tuple.1);
+                        info!(
+                            "current source ({}) and next source ({})",
+                            *object_id,
+                            source.id()
+                        );
                         creep_targets.insert(creep_name.clone(), CreepTarget::Harvest(*object_id));
                     }
                 }
@@ -78,12 +82,22 @@ pub fn game_loop() {
     for spawn in game::spawns().values() {
         debug!("running spawn {}", String::from(spawn.name()));
 
+        // Part::Move => 50,
+        // Part::Work => 100,
+        // Part::Carry => 50,
+        // Part::Attack => 80,
+        // Part::RangedAttack => 150,
+        // Part::Tough => 10,
+        // Part::Heal => 250,
+        // Part::Claim => 600,
+        // this 10 part is costing us -> 650
         let body = [
             Part::Carry,
             Part::Carry,
             Part::Work,
             Part::Work,
             Part::Work,
+            Part::Move,
             Part::Move,
             Part::Move,
             Part::Move,

@@ -1,6 +1,6 @@
 use screeps::{
     ConstructionSite, ObjectId, Source, Structure, StructureController, StructureExtension,
-    StructureObject, StructureRoad, StructureSpawn,
+    StructureObject, StructureRoad, StructureSpawn, StructureWall,
 };
 use serde::{Deserialize, Serialize};
 // this is one way to persist data between ticks within Rust's memory, as opposed to
@@ -18,6 +18,7 @@ pub enum CreepTarget {
     UpgradeController(ObjectId<StructureController>),
     UpgradeConstructionSite(ConstructionSite),
     RepairRoad(ObjectId<StructureRoad>),
+    RepairWall(ObjectId<StructureWall>),
     Harvest(ObjectId<Source>),
     DepositExtension(StructureExtension),
     DepositSpawn(ObjectId<StructureSpawn>),

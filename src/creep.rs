@@ -1,7 +1,7 @@
 use crate::storage::*;
 use log::*;
 use screeps::{
-    find, prelude::*, ConstructionSite, ObjectId, ResourceType, ReturnCode, Room, RoomObject,
+    find, prelude::*, ConstructionSite, ObjectId, Part, ResourceType, ReturnCode, Room, RoomObject,
     RoomObjectProperties, Source, StructureController, StructureExtension, StructureObject,
     StructureType,
 };
@@ -23,6 +23,9 @@ impl<'a> Creep<'a> {
     }
     pub fn store(&self) -> screeps::Store {
         self.inner_creep.store()
+    }
+    pub fn say(&self, msg: &str, public: bool) -> ReturnCode {
+        self.inner_creep.say(msg, public)
     }
     pub fn pos(&self) -> screeps::Position {
         self.inner_creep.pos()
@@ -188,11 +191,14 @@ impl<'a> Creep<'a> {
                                         }
                                     } else {
                                         let r = self.move_to(&spawn);
-                                        if r != ReturnCode::Ok {
-                                            warn!(
-                                                "could not move to spawn with id {} code: {:?}",
-                                                spawn_id, r
-                                            );
+                                        match r {
+                                            ReturnCode::Ok => {}
+                                            ReturnCode::Tired => {
+                                                self.say("got tired", false);
+                                            }
+                                            code => {
+                                                warn!("could not move to spawn code: {:?}", code);
+                                            }
                                         }
                                     }
                                 }
@@ -213,38 +219,42 @@ impl<'a> Creep<'a> {
                                     ResourceType::Energy,
                                     Some(value_to_transfer),
                                 );
-                                if r == ReturnCode::Ok {
-                                    creep_targets.remove(&name);
-                                    if self.store().get_used_capacity(Some(ResourceType::Energy))
-                                        > 0
-                                    {
-                                        if let Some(ext) = self.find_unfilled_extension() {
-                                            creep_targets.insert(
-                                                self.name(),
-                                                CreepTarget::DepositExtension(ext),
-                                            );
+                                match r {
+                                    ReturnCode::Ok => {
+                                        creep_targets.remove(&name);
+                                        if self
+                                            .store()
+                                            .get_used_capacity(Some(ResourceType::Energy))
+                                            > 0
+                                        {
+                                            if let Some(ext) = self.find_unfilled_extension() {
+                                                creep_targets.insert(
+                                                    self.name(),
+                                                    CreepTarget::DepositExtension(ext),
+                                                );
+                                            }
                                         }
                                     }
-                                } else {
-                                    warn!(
-                                            "could not make a transfer from creep {}, to extension {} code: {:?}",
-                                            self.name(),
-                                            ext.id(),
-                                            r
-                                        );
-                                    creep_targets.remove(&name);
+                                    ReturnCode::Full => {
+                                        self.say("FULL", false);
+                                        creep_targets.remove(&name);
+                                    }
+                                    code => {
+                                        warn!("could not transfer to extension code: {:?}", code);
+                                    }
                                 }
                             } else {
                                 let r = self.move_to(&ext);
-                                if r != ReturnCode::Ok {
-                                    warn!(
-                                        "could not move to spawn with id {}, code: {:?}",
-                                        ext.id(),
-                                        r
-                                    );
+                                match r {
+                                    ReturnCode::Ok => {}
+                                    ReturnCode::Tired => {
+                                        self.say("got tired", false);
+                                    }
+                                    code => {
+                                        warn!("could not move to extension code: {:?}", code);
+                                    }
                                 }
                             }
-                            // warn!("could not resolve spawn with id {}", ext_id);
                         } else {
                             creep_targets.remove(&name);
                         }
@@ -256,6 +266,7 @@ impl<'a> Creep<'a> {
                                 self.move_to(&site);
                             } else if r != ReturnCode::Ok {
                                 warn!("(upgrade site) couldn't upgrade: {:?}", r);
+                                self.say("CANNOT UPG", false);
                                 creep_targets.remove(&name);
                             }
                         } else {
@@ -279,6 +290,29 @@ impl<'a> Creep<'a> {
                                 self.move_to(&target);
                             } else if r != ReturnCode::Ok {
                                 warn!("could not repair road code: {:?}", r);
+                                creep_targets.remove(&name);
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                            // HARVEST random energy source
+                            if let Some(source_id) = self.pick_random_energy_source() {
+                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                            } else {
+                                warn!("could not find source with id");
+                            }
+                        }
+                    }
+                    CreepTarget::RepairWall(wall_id) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            let target = wall_id.resolve().unwrap();
+                            if target.hits() == target.hits_max() {
+                                creep_targets.remove(&name);
+                            }
+                            let r = self.repair(&target);
+                            if r == ReturnCode::NotInRange {
+                                self.move_to(&target);
+                            } else if r != ReturnCode::Ok {
+                                warn!("could not repair wall code: {:?}", r);
                                 creep_targets.remove(&name);
                             }
                         } else {
@@ -352,8 +386,8 @@ impl<'a> Creep<'a> {
                 let room = self.room().expect("couldn't resolve creep room");
                 if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                     // Upgrade controller, build shit or deposit in a spawn or extension
-                    let max_actions = 4;
-                    let rnd_number = rnd_source_idx(max_actions);
+                    let max = 10;
+                    let rnd_number = rnd_source_idx(max);
                     if rnd_number < 1 {
                         // Upgrade Controller
                         for structure in room.find(find::STRUCTURES).iter() {
@@ -364,7 +398,7 @@ impl<'a> Creep<'a> {
                             }
                         }
                         return;
-                    } else if rnd_number < 2 {
+                    } else if rnd_number < 5 {
                         // Deposit to spawn
                         for s in room.find(find::MY_SPAWNS).iter() {
                             if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
@@ -380,6 +414,50 @@ impl<'a> Creep<'a> {
                             }
                         }
                     } else {
+                        // REPAIR ROADS
+                        let objects =
+                            self.pos()
+                                .find_closest_by_path(find::STRUCTURES)
+                                .filter(|r| {
+                                    r.structure_type() == StructureType::Road
+                                        && r.as_attackable().unwrap().hits()
+                                            > r.as_attackable().unwrap().hits_max() / 3
+                                });
+                        if objects.is_none() {
+                            return;
+                        }
+                        for object in objects.iter() {
+                            match object {
+                                StructureObject::StructureRoad(road) => {
+                                    creep_targets
+                                        .insert(name.clone(), CreepTarget::RepairRoad(road.id()));
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                        // REPAIR WALL
+                        let objects =
+                            self.pos()
+                                .find_closest_by_path(find::STRUCTURES)
+                                .filter(|r| {
+                                    r.structure_type() == StructureType::Wall
+                                        && r.as_attackable().unwrap().hits()
+                                            > r.as_attackable().unwrap().hits_max() / 3
+                                });
+                        if objects.is_none() {
+                            return;
+                        }
+                        for object in objects.iter() {
+                            match object {
+                                StructureObject::StructureWall(wall) => {
+                                    creep_targets
+                                        .insert(name.clone(), CreepTarget::RepairWall(wall.id()));
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
                         // Upgrade EXTENSION
                         for site in room.find(find::CONSTRUCTION_SITES).iter() {
                             if site.structure_type() == StructureType::Extension {
@@ -400,27 +478,6 @@ impl<'a> Creep<'a> {
                             }
                             _ => {}
                         }
-                        // REPAIR ROADS
-                        let objects =
-                            self.pos()
-                                .find_closest_by_path(find::STRUCTURES)
-                                .filter(|r| {
-                                    r.structure_type() == StructureType::Road
-                                        && r.as_attackable().unwrap().hits()
-                                            > r.as_attackable().unwrap().hits_max() / 3
-                                });
-                        if objects.is_none() {
-                            return;
-                        }
-                        for object in objects.iter() {
-                            match object {
-                                StructureObject::StructureRoad(road) => {
-                                    creep_targets
-                                        .insert(name.clone(), CreepTarget::RepairRoad(road.id()));
-                                }
-                                _ => {}
-                            }
-                        }
                     }
                 } else {
                     // HARVEST random energy source
@@ -437,6 +494,42 @@ impl<'a> Creep<'a> {
 /// max is exclusive, i.e for max = 10, [0,10[
 fn rnd_source_idx(max: usize) -> usize {
     js_sys::Math::floor(js_sys::Math::random() * max as f64) as usize
+}
+
+pub enum BodyType {
+    HARVESTER,
+    HAULER,
+}
+
+impl BodyType {
+    pub fn body(&self) -> Vec<Part> {
+        match self {
+            BodyType::HARVESTER => {
+                vec![
+                    Part::Carry,
+                    Part::Work,
+                    Part::Work,
+                    Part::Work,
+                    Part::Work,
+                    Part::Work,
+                    Part::Move,
+                ]
+            }
+            BodyType::HAULER => {
+                vec![
+                    Part::Carry,
+                    Part::Carry,
+                    Part::Carry,
+                    Part::Move,
+                    Part::Move,
+                    Part::Move,
+                    Part::Move,
+                    Part::Move,
+                    Part::Move,
+                ]
+            }
+        }
+    }
 }
 
 struct Harvester<'a> {
@@ -487,28 +580,29 @@ impl<'a> Harvester<'a> {
             let r = self
                 .creep
                 .transfer(&target, ResourceType::Energy, Some(value_to_transfer));
-            if r == ReturnCode::Ok {
-                false
-            } else {
-                warn!(
-                    "could not make a transfer from creep {}, to extension {} code: {:?}",
-                    self.creep.name(),
-                    target.id(),
-                    r
-                );
-                false
+            match r {
+                ReturnCode::Ok => true,
+                ReturnCode::Full => {
+                    info!("deposit is full");
+                    false
+                }
+                code => {
+                    warn!("could not deposit energy, {:?}", code);
+                    false
+                }
             }
         } else {
             let r = self.creep.move_to(&target);
-            if r != ReturnCode::Ok {
-                warn!(
-                    "could not move to spawn with id {}, code: {:?}",
-                    target.id(),
-                    r
-                );
-                false
-            } else {
-                true
+            match r {
+                ReturnCode::Ok => true,
+                ReturnCode::Tired => {
+                    self.creep.say("got tired", false);
+                    false
+                }
+                code => {
+                    warn!("could not move to spawn code: {:?}", code);
+                    false
+                }
             }
         }
     }
