@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use creep::*;
 use log::*;
+use role::Role;
 use screeps::{
     find, game, prelude::*, ObjectId, Part, RawMemory, ReturnCode, RoomObjectProperties, Source,
 };
@@ -123,6 +124,7 @@ pub fn game_loop() {
 
     if time % 32 == 3 {
         let mut db = Database::init().expect("could not init database");
+        db.assign_roles();
         info!("running memory cleanup");
         db.clean_up();
     }
@@ -141,6 +143,16 @@ impl Database {
             Err(e) => {
                 info!("could not deserialize root_json: {}", e);
                 None
+            }
+        }
+    }
+
+    fn assign_roles(&mut self) {
+        for (name, creep) in self.data.creeps.iter_mut() {
+            if let None = creep.role {
+                if name == "34656950-0" {
+                    creep.role = Some(Role::Harvester);
+                }
             }
         }
     }

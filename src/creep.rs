@@ -1,3 +1,4 @@
+use crate::role::*;
 use crate::storage::*;
 use log::*;
 use screeps::{
@@ -114,6 +115,18 @@ impl<'a> Creep<'a> {
             return;
         }
         let room = self.room().unwrap();
+        // JsValue(Object({"role":"Harvester","_move":{"dest":{"x":37,"y":6,"room":"W3S24"},"time":34657677,"path":"1722224432233332222124321112218","room":"W3S24"}}))
+
+        // TODO: REMOVE THIS
+        if name == "34656950-0" {
+            let creep_memory = self.inner_creep.memory();
+            info!("{:?}", creep_memory);
+            match js_sys::Reflect::get(&creep_memory, &JsValue::from_str("role")) {
+                Ok(val) => info!("role: {}", val.as_bool().unwrap()),
+                Err(e) => warn!("could not get role {:?}", e),
+            }
+        }
+        //=============
 
         let target = creep_targets.get(&name);
         match target {
@@ -175,11 +188,14 @@ impl<'a> Creep<'a> {
                                             Some(value_to_transfer),
                                         );
                                         if r == ReturnCode::Full {
-                                            info!(
-                                                "spawn {} is FULL, will do something else",
-                                                spawn_id
-                                            );
-                                            creep_targets.remove(&name);
+                                            if let Some(ext) = self.find_unfilled_extension() {
+                                                creep_targets.insert(
+                                                    name,
+                                                    CreepTarget::DepositExtension(ext),
+                                                );
+                                            } else {
+                                                creep_targets.remove(&name);
+                                            }
                                         } else if r != ReturnCode::Ok {
                                             warn!(
                                             "could not make a transfer from creep {}, to spawn {} code: {:?}",
@@ -279,52 +295,6 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
-                    CreepTarget::RepairRoad(road_id) => {
-                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                            let target = road_id.resolve().unwrap();
-                            if target.hits() == target.hits_max() {
-                                creep_targets.remove(&name);
-                            }
-                            let r = self.repair(&target);
-                            if r == ReturnCode::NotInRange {
-                                self.move_to(&target);
-                            } else if r != ReturnCode::Ok {
-                                warn!("could not repair road code: {:?}", r);
-                                creep_targets.remove(&name);
-                            }
-                        } else {
-                            creep_targets.remove(&name);
-                            // HARVEST random energy source
-                            if let Some(source_id) = self.pick_random_energy_source() {
-                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
-                            } else {
-                                warn!("could not find source with id");
-                            }
-                        }
-                    }
-                    CreepTarget::RepairWall(wall_id) => {
-                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                            let target = wall_id.resolve().unwrap();
-                            if target.hits() == target.hits_max() {
-                                creep_targets.remove(&name);
-                            }
-                            let r = self.repair(&target);
-                            if r == ReturnCode::NotInRange {
-                                self.move_to(&target);
-                            } else if r != ReturnCode::Ok {
-                                warn!("could not repair wall code: {:?}", r);
-                                creep_targets.remove(&name);
-                            }
-                        } else {
-                            creep_targets.remove(&name);
-                            // HARVEST random energy source
-                            if let Some(source_id) = self.pick_random_energy_source() {
-                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
-                            } else {
-                                warn!("could not find source with id");
-                            }
-                        }
-                    }
                     CreepTarget::Harvester(source_id, object) => {
                         let harvester = Harvester { creep: self };
                         if self.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
@@ -379,6 +349,33 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
+                    CreepTarget::Repair(object_id) => {
+                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+                            match object_id.resolve() {
+                                Some(structure) => {
+                                    let r = self.repair(&structure);
+                                    if r == ReturnCode::NotInRange {
+                                        self.move_to(&structure);
+                                    } else if r != ReturnCode::Ok {
+                                        warn!("couldn't repair: {:?}", r);
+                                        self.say("CANNOT REP", false);
+                                        creep_targets.remove(&name);
+                                    }
+                                }
+                                None => {
+                                    creep_targets.remove(&name);
+                                }
+                            }
+                        } else {
+                            creep_targets.remove(&name);
+                            // HARVEST random energy source
+                            if let Some(source_id) = self.pick_random_energy_source() {
+                                creep_targets.insert(name, CreepTarget::Harvest(source_id));
+                            } else {
+                                warn!("could not find source with id");
+                            }
+                        }
+                    }
                 };
             }
             None => {
@@ -414,44 +411,25 @@ impl<'a> Creep<'a> {
                             }
                         }
                     } else {
-                        // REPAIR ROADS
-                        let objects =
-                            self.pos()
-                                .find_closest_by_path(find::STRUCTURES)
-                                .filter(|r| {
-                                    r.structure_type() == StructureType::Road
-                                        && r.as_attackable().unwrap().hits()
-                                            > r.as_attackable().unwrap().hits_max() / 3
-                                });
-                        for object in objects.iter() {
-                            match object {
-                                StructureObject::StructureRoad(road) => {
-                                    creep_targets
-                                        .insert(name.clone(), CreepTarget::RepairRoad(road.id()));
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // REPAIR WALL
-                        let objects =
-                            self.pos()
-                                .find_closest_by_path(find::STRUCTURES)
-                                .filter(|r| {
-                                    r.structure_type() == StructureType::Wall
-                                        && r.as_attackable().unwrap().hits()
-                                            > r.as_attackable().unwrap().hits_max() / 3
-                                });
+                        // REPAIR
+                        let objects: Vec<StructureObject> = room
+                            .find(find::STRUCTURES)
+                            .into_iter()
+                            .filter(|r| {
+                                r.as_attackable().unwrap().hits()
+                                    > r.as_attackable().unwrap().hits_max() / 3
+                            })
+                            .collect();
 
                         for object in objects.iter() {
                             match object {
-                                StructureObject::StructureWall(wall) => {
-                                    creep_targets
-                                        .insert(name.clone(), CreepTarget::RepairWall(wall.id()));
+                                obj => {
+                                    creep_targets.insert(
+                                        name.clone(),
+                                        CreepTarget::Repair(obj.as_structure().id()),
+                                    );
                                     return;
                                 }
-                                _ => {}
                             }
                         }
 
@@ -465,6 +443,7 @@ impl<'a> Creep<'a> {
                                 return;
                             }
                         }
+
                         // Upgrade RANDOM CONSTRUCTION SITE
                         let site = self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
                         match site {
@@ -473,9 +452,7 @@ impl<'a> Creep<'a> {
                                     .insert(name, CreepTarget::UpgradeConstructionSite(site));
                                 return;
                             }
-                            _ => {
-                                return;
-                            }
+                            _ => {}
                         }
                     }
                 } else {

@@ -19,12 +19,11 @@ thread_local! {
 pub enum CreepTarget {
     UpgradeController(ObjectId<StructureController>),
     UpgradeConstructionSite(ConstructionSite),
-    RepairRoad(ObjectId<StructureRoad>),
-    RepairWall(ObjectId<StructureWall>),
     Harvest(ObjectId<Source>),
     DepositExtension(StructureExtension),
     DepositSpawn(ObjectId<StructureSpawn>),
     Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
+    Repair(ObjectId<Structure>),
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Root {
@@ -33,6 +32,7 @@ pub struct Root {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreepMemory {
     _move: Option<Move>,
+    pub role: Option<Role>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
