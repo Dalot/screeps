@@ -1,3 +1,4 @@
+use crate::role::Role;
 use screeps::{
     ConstructionSite, ObjectId, Source, Structure, StructureController, StructureExtension,
     StructureObject, StructureRoad, StructureSpawn, StructureWall,
@@ -9,6 +10,7 @@ use std::collections::HashMap;
 // keeping state in memory on game objects - but will be lost on global resets!
 thread_local! {
     pub static CREEPS_TARGET: RefCell<HashMap<String, CreepTarget>> = RefCell::new(HashMap::new());
+    pub static CREEPS_ROLE: RefCell<HashMap<String, Role>> = RefCell::new(HashMap::new());
     static CREEPS_MEMORY: RefCell<HashMap<String, CreepMemory>> = RefCell::new(HashMap::new());
 }
 

@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::*;
 
 mod creep;
 mod logging;
+mod role;
 mod storage;
 
 // add wasm_bindgen to any function you would like to expose for call from js
@@ -23,8 +24,6 @@ pub fn setup() {
 pub fn game_loop() {
     debug!("loop starting! CPU: {}", game::cpu::get_used());
     let mut harvest_sources = HashMap::<ObjectId<Source>, (usize, String)>::new();
-    // mutably borrow the creep_targets refcell, which is holding our creep target locks
-    // in the wasm heap
     CREEPS_TARGET.with(|creep_targets_refcell| {
         let mut creep_targets = creep_targets_refcell.borrow_mut();
         debug!("running creeps");
@@ -32,6 +31,7 @@ pub fn game_loop() {
             let creep = Creep::new(&creep);
             creep.run_creep(&mut creep_targets);
         }
+        // populate harvest_sources so we can next avoid to have many creeps trying to harvest
         for (creep_name, creep_target) in creep_targets.iter() {
             if let CreepTarget::Harvest(source_id) = creep_target {
                 let total = harvest_sources
@@ -40,6 +40,10 @@ pub fn game_loop() {
                 (*total).0 += 1;
             }
         }
+    });
+    CREEPS_ROLE.with(|creep_role_refcell| {
+        let mut creep_roles = creep_role_refcell.borrow_mut();
+        for (creep_name, role) in creep_roles.iter() {}
     });
 
     CREEPS_TARGET.with(|creep_targets_refcell| {

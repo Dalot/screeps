@@ -531,7 +531,13 @@ impl BodyType {
         }
     }
 }
-
+pub trait CanHarvest {
+    fn harvest(&self, source_id: ObjectId<Source>) -> bool;
+}
+pub trait CanDeposit {
+    fn find_deposit(&self) -> Option<StructureObject>;
+    fn deposit<T>(&self, target: T) -> bool;
+}
 struct Harvester<'a> {
     pub creep: &'a Creep<'a>,
 }
