@@ -423,9 +423,6 @@ impl<'a> Creep<'a> {
                                         && r.as_attackable().unwrap().hits()
                                             > r.as_attackable().unwrap().hits_max() / 3
                                 });
-                        if objects.is_none() {
-                            return;
-                        }
                         for object in objects.iter() {
                             match object {
                                 StructureObject::StructureRoad(road) => {
@@ -436,6 +433,7 @@ impl<'a> Creep<'a> {
                                 _ => {}
                             }
                         }
+
                         // REPAIR WALL
                         let objects =
                             self.pos()
@@ -445,9 +443,7 @@ impl<'a> Creep<'a> {
                                         && r.as_attackable().unwrap().hits()
                                             > r.as_attackable().unwrap().hits_max() / 3
                                 });
-                        if objects.is_none() {
-                            return;
-                        }
+
                         for object in objects.iter() {
                             match object {
                                 StructureObject::StructureWall(wall) => {
@@ -458,6 +454,7 @@ impl<'a> Creep<'a> {
                                 _ => {}
                             }
                         }
+
                         // Upgrade EXTENSION
                         for site in room.find(find::CONSTRUCTION_SITES).iter() {
                             if site.structure_type() == StructureType::Extension {
@@ -476,7 +473,9 @@ impl<'a> Creep<'a> {
                                     .insert(name, CreepTarget::UpgradeConstructionSite(site));
                                 return;
                             }
-                            _ => {}
+                            _ => {
+                                return;
+                            }
                         }
                     }
                 } else {
