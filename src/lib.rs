@@ -42,10 +42,10 @@ pub fn game_loop() {
             }
         }
     });
-    CREEPS_ROLE.with(|creep_role_refcell| {
-        let mut creep_roles = creep_role_refcell.borrow_mut();
-        for (creep_name, role) in creep_roles.iter() {}
-    });
+    // CREEPS_ROLE.with(|creep_role_refcell| {
+    //     let mut creep_roles = creep_role_refcell.borrow_mut();
+    //     for (creep_name, role) in creep_roles.iter() {}
+    // });
 
     CREEPS_TARGET.with(|creep_targets_refcell| {
         let mut creep_targets = creep_targets_refcell.borrow_mut();
@@ -207,9 +207,4 @@ impl Database {
     fn get_mut_creep_memory(&mut self, name: &str) -> Option<&mut CreepMemory> {
         self.data.creeps.get_mut(name)
     }
-}
-
-/// max is exclusive, i.e for max = 10, [0,10[
-fn rnd_source_idx(max: usize) -> usize {
-    js_sys::Math::floor(js_sys::Math::random() * max as f64) as usize
 }

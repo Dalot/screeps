@@ -1,7 +1,7 @@
 use crate::role::Role;
 use screeps::{
     ConstructionSite, ObjectId, Source, Structure, StructureController, StructureExtension,
-    StructureObject, StructureRoad, StructureSpawn, StructureWall,
+    StructureObject, StructureSpawn,
 };
 use serde::{Deserialize, Serialize};
 // this is one way to persist data between ticks within Rust's memory, as opposed to
@@ -17,15 +17,15 @@ thread_local! {
 // this enum will represent a creep's lock on a specific target object, storing a js reference to the object id so that we can grab a fresh reference to the object each successive tick, since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
 #[derive(Clone)]
 pub enum CreepTarget {
-    RepairRoad(ObjectId<StructureRoad>),
-    RepairWall(ObjectId<StructureWall>),
     UpgradeController(ObjectId<StructureController>),
     UpgradeConstructionSite(ConstructionSite),
     Harvest(ObjectId<Source>),
+    Deposit(),
+    MovingToSpawn(ObjectId<StructureSpawn>),
     DepositExtension(StructureExtension),
     DepositSpawn(ObjectId<StructureSpawn>),
     Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
-    Repair(Structure),
+    Repair(ObjectId<Structure>),
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Root {

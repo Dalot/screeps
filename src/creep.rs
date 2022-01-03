@@ -1,10 +1,8 @@
-use crate::role::*;
 use crate::storage::*;
 use log::*;
 use screeps::{
     find, prelude::*, ConstructionSite, ObjectId, Part, ResourceType, ReturnCode, Room, RoomObject,
     RoomObjectProperties, Source, StructureController, StructureExtension, StructureObject,
-    StructureType,
 };
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -349,15 +347,23 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
-                    CreepTarget::Repair(object) => {
+                    CreepTarget::Repair(object_id) => {
                         if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                            let r = self.repair(&object);
-                            if r == ReturnCode::NotInRange {
-                                self.move_to(&object);
-                            } else if r != ReturnCode::Ok {
-                                warn!("couldn't repair: {:?}", r);
-                                self.say("CANNOT REP", false);
-                                creep_targets.remove(&name);
+                            match object_id.resolve() {
+                                Some(obj) => {
+                                    let r = self.repair(&obj);
+                                    if r == ReturnCode::NotInRange {
+                                        self.move_to(&obj);
+                                    } else if r != ReturnCode::Ok {
+                                        warn!("couldn't repair: {:?}", r);
+                                        self.say("CANNOT REP", false);
+                                        creep_targets.remove(&name);
+                                    }
+                                }
+                                None => {
+                                    warn!("could not resolve object in repair");
+                                    creep_targets.remove(&name);
+                                }
                             }
                         } else {
                             creep_targets.remove(&name);
@@ -369,14 +375,37 @@ impl<'a> Creep<'a> {
                             }
                         }
                     }
-                    _ => {
-                        creep_targets.remove(&name);
+                    CreepTarget::Deposit() => {
+                        // DEPOSIT SOMEWHERE
+                        // Deposit to spawn
+                        for s in room.find(find::MY_SPAWNS).iter() {
+                            if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
+                                break;
+                            }
+                            creep_targets.insert(self.name(), CreepTarget::DepositSpawn(s.id()));
+                            return;
+                        }
+                        // Deposit to extension if spawn is full
+                        if let Some(ext) = self.find_unfilled_extension() {
+                            creep_targets.insert(self.name(), CreepTarget::DepositExtension(ext));
+                            return;
+                        }
+                        warn!("could not find spawn or extension to deposit to");
                     }
+                    CreepTarget::MovingToSpawn(obj_id) => match obj_id.resolve() {
+                        Some(spawn) => {
+                            if self.pos().in_range_to(spawn.pos(), 4) {
+                                creep_targets.insert(name, CreepTarget::Deposit());
+                            } else {
+                                return;
+                            }
+                        }
+                        None => warn!("could not resolve spawn id"),
+                    },
                 };
             }
             None => {
                 // no target, let's find one depending on if we have energy
-                let room = self.room().expect("couldn't resolve creep room");
                 if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                     // Upgrade controller, build shit or deposit in a spawn or extension
                     let max = 10;
@@ -391,64 +420,72 @@ impl<'a> Creep<'a> {
                             }
                         }
                         return;
-                    } else if rnd_number < 4 {
-                        // Deposit to spawn
+                    } else if rnd_number < 8 {
                         for s in room.find(find::MY_SPAWNS).iter() {
-                            if s.store().get_free_capacity(Some(ResourceType::Energy)) == 0 {
-                                break;
-                            }
-                            creep_targets.insert(self.name(), CreepTarget::DepositSpawn(s.id()));
+                            creep_targets.insert(name, CreepTarget::MovingToSpawn(s.id()));
                             return;
                         }
-                        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
-                            if let Some(ext) = self.find_unfilled_extension() {
-                                creep_targets
-                                    .insert(self.name(), CreepTarget::DepositExtension(ext));
-                            }
-                        }
                     } else {
-                        // REPAIR
-                        let objects: Vec<StructureObject> = room
-                            .find(find::STRUCTURES)
-                            .into_iter()
-                            .filter(|r| {
-                                r.as_attackable().unwrap().hits()
-                                    > r.as_attackable().unwrap().hits_max() / 3
-                            })
-                            .collect();
-
-                        for object in objects.iter() {
+                        let max = 2;
+                        let rnd_number = rnd_source_idx(max);
+                        if rnd_number < 1 {
+                            // REPAIR
+                            let object = room
+                                .find(find::STRUCTURES)
+                                .into_iter()
+                                .filter(|o| {
+                                    if let Some(attackable) = o.as_attackable() {
+                                        attackable.hits() < attackable.hits_max() / 3
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .reduce(|fewer_hp_obj, next_obj| {
+                                    // here we are sure we only have only attackables
+                                    if let Some(next_attackable) = next_obj.as_attackable() {
+                                        if let Some(fewer_hp_atttackble) =
+                                            fewer_hp_obj.as_attackable()
+                                        {
+                                            if next_attackable.hits() < fewer_hp_atttackble.hits() {
+                                                next_obj
+                                            } else {
+                                                fewer_hp_obj
+                                            }
+                                        } else {
+                                            fewer_hp_obj
+                                        }
+                                    } else {
+                                        warn!("could not get one of the attackables");
+                                        fewer_hp_obj
+                                    }
+                                })
+                                .take();
                             match object {
-                                obj => {
+                                Some(obj) => {
                                     creep_targets.insert(
                                         name.clone(),
-                                        CreepTarget::Repair(obj.as_structure().clone()),
+                                        CreepTarget::Repair(obj.as_structure().id()),
                                     );
                                     return;
                                 }
+                                None => {}
                             }
-                        }
-
-                        // Upgrade EXTENSION
-                        for site in room.find(find::CONSTRUCTION_SITES).iter() {
-                            if site.structure_type() == StructureType::Extension {
-                                creep_targets.insert(
-                                    name,
-                                    CreepTarget::UpgradeConstructionSite(site.clone()),
-                                );
-                                return;
+                        } else {
+                            // Upgrade RANDOM CONSTRUCTION SITE but Controller
+                            let site = self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
+                            match site {
+                                Some(val) => match val.structure_type() {
+                                    screeps::StructureType::Controller => {}
+                                    _ => {
+                                        creep_targets.insert(
+                                            name,
+                                            CreepTarget::UpgradeConstructionSite(val),
+                                        );
+                                        return;
+                                    }
+                                },
+                                _ => {}
                             }
-                        }
-
-                        // Upgrade RANDOM CONSTRUCTION SITE
-                        let site = self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
-                        match site {
-                            Some(site) => {
-                                creep_targets
-                                    .insert(name, CreepTarget::UpgradeConstructionSite(site));
-                                return;
-                            }
-                            _ => {}
                         }
                     }
                 } else {
