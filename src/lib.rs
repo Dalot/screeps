@@ -4,7 +4,8 @@ use creep::*;
 use log::*;
 use role::Role;
 use screeps::{
-    find, game, prelude::*, ObjectId, Part, RawMemory, ReturnCode, RoomObjectProperties, Source,
+    find, game, look, prelude::*, ObjectId, Part, RawMemory, ReturnCode, RoomObjectProperties,
+    Source, StructureObject,
 };
 use storage::*;
 use wasm_bindgen::prelude::*;
@@ -32,48 +33,12 @@ pub fn game_loop() {
             let creep = Creep::new(&creep);
             creep.run_creep(&mut creep_targets);
         }
-        // populate harvest_sources so we can next avoid to have many creeps trying to harvest
-        for (creep_name, creep_target) in creep_targets.iter() {
-            if let CreepTarget::Harvest(source_id) = creep_target {
-                let total = harvest_sources
-                    .entry(source_id.clone())
-                    .or_insert((1, creep_name.clone()));
-                (*total).0 += 1;
-            }
-        }
     });
     // CREEPS_ROLE.with(|creep_role_refcell| {
     //     let mut creep_roles = creep_role_refcell.borrow_mut();
     //     for (creep_name, role) in creep_roles.iter() {}
     // });
 
-    CREEPS_TARGET.with(|creep_targets_refcell| {
-        let mut creep_targets = creep_targets_refcell.borrow_mut();
-        for (object_id, tuple) in harvest_sources.iter() {
-            if tuple.0 > 7 {
-                info!(
-                    "source ({}) is too crowded, will try to clean the area",
-                    *object_id
-                );
-                let creep_name = String::from(tuple.1.clone());
-                let creep = game::creeps()
-                    .get(creep_name.clone())
-                    .expect("could not find creep");
-                let room = creep.room().expect("couldn't resolve creep room");
-                let sources = room.find(find::SOURCES_ACTIVE);
-                for source in sources.iter() {
-                    if source.id() != *object_id {
-                        info!(
-                            "current source ({}) and next source ({})",
-                            *object_id,
-                            source.id()
-                        );
-                        creep_targets.insert(creep_name.clone(), CreepTarget::Harvest(*object_id));
-                    }
-                }
-            }
-        }
-    });
     debug!("running spawns");
     // Game::spawns returns a `js_sys::Object`, which is a light reference to an
     // object of any kind which is held on the javascript heap.
@@ -95,19 +60,21 @@ pub fn game_loop() {
         // Part::Tough => 10,
         // Part::Heal => 250,
         // Part::Claim => 600,
-        // this 10 part is costing us -> 650
+        // 13 part is costing us -> 850
         let body = [
             Part::Carry,
             Part::Carry,
             Part::Carry,
-            // Part::Work,
-            // Part::Work,
             Part::Work,
+            Part::Work,
+            Part::Work,
+            Part::Work,
+            Part::Move,
+            Part::Move,
+            Part::Move,
+            Part::Move,
+            Part::Move,
             // Part::Move,
-            // Part::Move,
-            Part::Move,
-            Part::Move,
-            Part::Move,
             Part::Move,
         ];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
@@ -118,6 +85,46 @@ pub fn game_loop() {
                 warn!("couldn't spawn: {:?}", res);
             } else {
                 additional += 1;
+            }
+        }
+    }
+
+    for room in game::rooms().values() {
+        let hostiles = room.find(find::HOSTILE_CREEPS);
+        if hostiles.len() == 0 {
+            break;
+        }
+        let structures = room.find(find::MY_STRUCTURES);
+        let towers: Vec<&StructureObject> = structures
+            .iter()
+            .filter(|s| s.structure_type() == screeps::StructureType::Tower)
+            .collect();
+
+        for h in hostiles.iter() {
+            for t in towers.iter() {
+                match t {
+                    StructureObject::StructureTower(t) => {
+                        let r = t.attack(h);
+                        if r != ReturnCode::Ok {
+                            warn!("couldn't attack: {:?}", r);
+                        }
+                    }
+                    _ => {
+                        warn!("something went wrong on filtering towers")
+                    }
+                }
+            }
+        }
+    }
+
+    if false {
+        for room in game::rooms().values() {
+            let sources = room.find(find::SOURCES_ACTIVE);
+            for source in sources.iter() {
+                let pos = source.pos();
+                let nearby_creeps = room.look_for_at_xy(look::CREEPS, pos.x().u8(), pos.y().u8());
+                // let nearby_creeps = room.look_at
+                // if nearby_creeps.len() > 0 {}
             }
         }
     }
