@@ -21,10 +21,7 @@ pub enum CreepTarget {
     UpgradeConstructionSite(ConstructionSite),
     Harvest(ObjectId<Source>),
     Deposit(),
-    MovingToSpawn(ObjectId<StructureSpawn>),
-    DepositExtension(StructureExtension),
-    DepositSpawn(ObjectId<StructureSpawn>),
-    Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
+    // Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
     Repair(ObjectId<Structure>),
 }
 #[derive(Debug, Serialize, Deserialize)]
