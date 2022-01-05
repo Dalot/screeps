@@ -231,25 +231,30 @@ impl<'a> Creep<'a> {
                         }
                     }
                     let deposit = harvester.find_deposit();
-                    if let Some(val) = deposit {
-                        match val {
-                            StructureObject::StructureExtension(ext) => {
-                                if DepositCode::Done == harvester.deposit(ext) {
-                                    creep_targets.remove(&name);
-                                }
-                            }
-                            StructureObject::StructureSpawn(s) => {
-                                if DepositCode::Done == harvester.deposit(s) {
-                                    creep_targets.remove(&name);
-                                }
-                            }
-                            _ => {
-                                warn!("how the hell could this be different from a spawn or extension")
-                            }
+                    if let Some(d) = deposit {
+                        if DepositCode::Done == harvester.deposit(d) {
+                            creep_targets.remove(&name);
                         }
-                    } else {
-                        info!("(CreepTarget::Deposit) could not find deposit");
                     }
+                    // if let Some(val) = deposit {
+                    //     match val {
+                    //         StructureObject::StructureExtension(ext) => {
+                    //             if DepositCode::Done == harvester.deposit(ext) {
+                    //                 creep_targets.remove(&name);
+                    //             }
+                    //         }
+                    //         StructureObject::StructureSpawn(s) => {
+                    //             if DepositCode::Done == harvester.deposit(s) {
+                    //                 creep_targets.remove(&name);
+                    //             }
+                    //         }
+                    //         _ => {
+                    //             warn!("how the hell could this be different from a spawn or extension")
+                    //         }
+                    //     }
+                    // } else {
+                    //     info!("(CreepTarget::Deposit) could not find deposit");
+                    // }
                 }
                 CreepTarget::UpgradeController(controller_id) => {
                     if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
@@ -420,6 +425,8 @@ pub trait CanDeposit {
     fn find_deposit(&self) -> Option<StructureObject>;
     fn deposit<T>(&self, target: T) -> bool;
 }
+trait Depositable: Transferable + HasPosition + HasStore {}
+impl<T: Transferable + HasPosition + HasStore> Depositable for T {}
 #[derive(PartialEq)]
 pub enum DepositCode {
     Done = 0,
@@ -450,7 +457,7 @@ impl<'a> Harvester<'a> {
         };
     }
 
-    pub fn find_deposit(&self) -> Option<StructureObject> {
+    pub fn find_deposit(&self) -> Option<Box<dyn Depositable>> {
         let room = self.creep.room().unwrap();
         let spawns = room.find(find::MY_SPAWNS);
 
@@ -458,34 +465,70 @@ impl<'a> Harvester<'a> {
             .iter()
             .filter(|s| s.store().get_free_capacity(Some(ResourceType::Energy)) > 0)
             .last();
-
         let creep_pos = self.creep.pos();
 
+        let storages = room.find(find::MY_STRUCTURES);
+        let storage = storages
+            .iter()
+            .filter(|s| s.structure_type() == screeps::StructureType::Storage)
+            .filter(|s| {
+                s.as_has_store()
+                    .unwrap()
+                    .store()
+                    .get_free_capacity(Some(ResourceType::Energy))
+                    > 0
+            })
+            .last();
+
+        let mut deposits = Vec::<Box<dyn Depositable>>::new();
+        if let Some(s) = spawn {
+            deposits.push(Box::new(s.clone()));
+        }
+
         if let Some(ext) = self.creep.find_unfilled_extension() {
-            if let Some(s) = spawn {
-                if ext.pos().get_range_to(creep_pos) < s.pos().get_range_to(creep_pos) {
-                    Some(StructureObject::StructureExtension(ext))
-                } else {
-                    Some(StructureObject::StructureSpawn(s.clone()))
+            deposits.push(Box::new(ext));
+        }
+        if let Some(obj) = storage {
+            match obj {
+                StructureObject::StructureStorage(s) => {
+                    deposits.push(Box::new(s.clone()));
                 }
-            } else {
-                Some(StructureObject::StructureExtension(ext))
-            }
-        } else {
-            if let Some(s) = spawn {
-                Some(StructureObject::StructureSpawn(s.clone()))
-            } else {
-                None
+                _ => {
+                    warn!("expteced only a storage here");
+                }
             }
         }
+
+        deposits.into_iter().reduce(|closer, next| {
+            if next.pos().get_range_to(creep_pos) < closer.pos().get_range_to(creep_pos) {
+                next
+            } else {
+                closer
+            }
+        })
+
+        // if let Some(ext) = self.creep.find_unfilled_extension() {
+        //     if let Some(s) = spawn {
+        //         if ext.pos().get_range_to(creep_pos) < s.pos().get_range_to(creep_pos) {
+        //             Some(StructureObject::StructureExtension(ext))
+        //         } else {
+        //             Some(StructureObject::StructureSpawn(s.clone()))
+        //         }
+        //     } else {
+        //         Some(StructureObject::StructureExtension(ext))
+        //     }
+        // } else {
+        //     if let Some(s) = spawn {
+        //         Some(StructureObject::StructureSpawn(s.clone()))
+        //     } else {
+        //         None
+        //     }
+        // }
     }
 
     /// Can return false when it's not done with deposit everything
     /// or because it failed for some reason which should be logged
-    pub fn deposit<T>(&self, target: T) -> DepositCode
-    where
-        T: Transferable + HasStore,
-    {
+    pub fn deposit(&self, target: Box<dyn Depositable>) -> DepositCode {
         if self
             .creep
             .store()
@@ -496,7 +539,7 @@ impl<'a> Harvester<'a> {
                 let value_to_transfer = self.creep.get_value_to_transfer(&target.store());
                 let r = self
                     .creep
-                    .transfer(&target, ResourceType::Energy, Some(value_to_transfer));
+                    .transfer(*target, ResourceType::Energy, Some(value_to_transfer));
                 info!("deposit code: {:?}", r);
                 match r {
                     ReturnCode::Ok => {
@@ -513,7 +556,7 @@ impl<'a> Harvester<'a> {
                     }
                 }
             } else {
-                let r = self.creep.move_to(&target);
+                let r = self.creep.move_to(&(*target));
                 match r {
                     ReturnCode::Ok => DepositCode::NotNear,
 
@@ -533,7 +576,7 @@ impl<'a> Harvester<'a> {
     }
 }
 
-pub fn find_tower(room: Room) -> Option<StructureTower> {
+pub fn find_tower(room: Room) -> Option<Box<dyn Depositable>> {
     let structures = room.find(find::MY_STRUCTURES);
     let tower_obj = structures
         .into_iter()
@@ -567,7 +610,10 @@ pub fn find_tower(room: Room) -> Option<StructureTower> {
 
     match tower_obj {
         Some(t_obj) => match t_obj {
-            StructureObject::StructureTower(t) => Some(t),
+            StructureObject::StructureTower(t) => {
+                let res: Box<dyn Depositable> = Box::new(t);
+                Some(res)
+            }
             _ => {
                 warn!("expected only a tower here");
                 None
