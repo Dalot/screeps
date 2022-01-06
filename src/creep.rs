@@ -2,8 +2,8 @@ use crate::storage::*;
 use log::*;
 use screeps::{
     find, game, prelude::*, rooms, ConstructionSite, ObjectId, Part, ResourceType, ReturnCode,
-    Room, RoomObject, RoomObjectProperties, Source, StructureController, StructureExtension,
-    StructureObject, StructureTower,
+    Room, RoomObject, RoomObjectProperties, RoomPosition, Source, StructureContainer,
+    StructureController, StructureExtension, StructureObject, StructureTower, StructureType,
 };
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -96,7 +96,7 @@ impl<'a> Creep<'a> {
         let structures = self.inner_creep.room().unwrap().find(find::MY_STRUCTURES);
         let closest_ext_obj = structures
             .iter()
-            .filter(|s| screeps::StructureType::Extension == s.structure_type())
+            .filter(|s| StructureType::Extension == s.structure_type())
             .filter(|s| {
                 s.as_has_store()
                     .expect("expected an extension with a store")
@@ -124,7 +124,7 @@ impl<'a> Creep<'a> {
             None
         }
     }
-    pub fn run_creep(&self, creep_targets: &mut HashMap<String, CreepTarget>) {
+    pub fn run(&self, creep_targets: &mut HashMap<String, CreepTarget>) {
         let name = self.name();
         if self.spawning() {
             return;
@@ -139,11 +139,11 @@ impl<'a> Creep<'a> {
                         match source_id.resolve() {
                             Some(source) => {
                                 if self.pos().is_near_to(source.pos()) {
-                                    let r = self.harvest(&source);
-                                    if r != ReturnCode::Ok {
-                                        warn!("couldn't harvest: {:?}", r);
-                                    }
+                                    //ignoring return code for harvest because it already logs
+                                    //inside
+                                    let _ = self.harvest(&source);
                                 } else {
+                                    self.say("HARVEST", false);
                                     self.move_to(&source);
                                 }
                             }
@@ -156,15 +156,13 @@ impl<'a> Creep<'a> {
                 CreepTarget::UpgradeConstructionSite(site) => {
                     if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
                         match site.structure_type() {
-                            screeps::StructureType::Controller => {
+                            StructureType::Controller => {
                                 warn!("you have sent controller and it's not supported");
                             }
                             _ => {
                                 let mut r = self.build(&site);
                                 match r {
-                                    ReturnCode::Ok => {
-                                        self.say("BUILD", false);
-                                    }
+                                    ReturnCode::Ok => {}
                                     ReturnCode::InvalidTarget => {
                                         // this could be a creep in the same square
                                         // could be that the site is finished upgrading
@@ -174,16 +172,16 @@ impl<'a> Creep<'a> {
                                         creep_targets.remove(&name);
                                     }
                                     ReturnCode::NotInRange => {
+                                        self.say("BUILD", false);
                                         r = self.move_to(&site);
                                         if r == ReturnCode::Tired {
-                                            self.say("tired", false);
+                                            self.say("TIRED", false);
                                         } else if r != ReturnCode::Ok {
                                             warn!("could not move to site code: {:?}", r);
                                         }
                                     }
                                     code => {
                                         warn!("(upgrade site) couldn't upgrade: {:?}", code);
-                                        self.say("CANNOT UPG", false);
                                         creep_targets.remove(&name);
                                     }
                                 }
@@ -201,12 +199,11 @@ impl<'a> Creep<'a> {
                                     creep_targets.remove(&name);
                                 }
                                 let r = self.repair(&obj);
-                                self.say("REPAIR", false);
                                 if r == ReturnCode::NotInRange {
+                                    self.say("REPAIR", false);
                                     self.move_to(&obj);
                                 } else if r != ReturnCode::Ok {
                                     warn!("couldn't repair: {:?}", r);
-                                    self.say("CANNOT REP", false);
                                     creep_targets.remove(&name);
                                 }
                             }
@@ -243,8 +240,13 @@ impl<'a> Creep<'a> {
                                     creep_targets.remove(&name);
                                 }
                             }
+                            StructureObject::StructureStorage(s) => {
+                                if DepositCode::Done == harvester.deposit(s) {
+                                    creep_targets.remove(&name);
+                                }
+                            }
                             _ => {
-                                warn!("how the hell could this be different from a spawn or extension")
+                                warn!("how the hell could this be different from a spawn, extension or storage")
                             }
                         }
                     } else {
@@ -257,13 +259,19 @@ impl<'a> Creep<'a> {
                             Some(controller) => {
                                 let mut r = self.upgrade_controller(&controller);
                                 if r == ReturnCode::NotInRange {
+                                    self.say("CONTROLLER", false);
                                     r = self.move_to(&controller);
-                                    if r != ReturnCode::Ok {
-                                        warn!("could not move to controller code: {:?}", r);
+                                    match r {
+                                        ReturnCode::Ok => {}
+                                        ReturnCode::Tired => {
+                                            self.say("TIRED", false);
+                                        }
+                                        _ => {
+                                            warn!("could not move to controller code: {:?}", r);
+                                        }
                                     }
                                 } else if r != ReturnCode::Ok {
                                     warn!("(upgrade controller) couldn't upgrade: {:?}", r);
-                                    self.say("CANNOT UPG", false);
                                     creep_targets.remove(&name);
                                 }
                             }
@@ -273,10 +281,47 @@ impl<'a> Creep<'a> {
                         creep_targets.remove(&name);
                     }
                 }
+                CreepTarget::Pickup(r) => {
+                    if self.pos().is_near_to(r.pos()) {
+                        let r = self.inner_creep.pickup(&r);
+                        match r {
+                            ReturnCode::Ok => {
+                                creep_targets.insert(name, CreepTarget::Deposit());
+                                return;
+                            }
+                            _ => {
+                                warn!("could not pickup: {:?}", r);
+                                creep_targets.remove(&name);
+                                return;
+                            }
+                        }
+                    } else {
+                        let r = self.move_to(r);
+                        match r {
+                            ReturnCode::Ok => {}
+                            ReturnCode::Tired => {
+                                self.say("TIRED", false);
+                                return;
+                            }
+                            _ => {
+                                warn!("could not move to drop: {:?}", r);
+                                return;
+                            }
+                        }
+                    }
+                }
             },
             None => {
                 // no target, let's find one depending on if we have energy
                 if self.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
+                    let drop = self.pos().find_closest_by_path(find::DROPPED_RESOURCES);
+                    if let Some(d) = drop {
+                        if ReturnCode::Ok == self.move_to(d.clone()) {
+                            creep_targets.insert(name, CreepTarget::Pickup(d));
+                        }
+                        return;
+                    }
+
                     // HARVEST random energy source
                     if let Some(source_id) = self.pick_closest_energy_source() {
                         creep_targets.insert(name, CreepTarget::Harvest(source_id));
@@ -290,24 +335,22 @@ impl<'a> Creep<'a> {
                     if rnd_number < 3 {
                         creep_targets.insert(name, CreepTarget::Deposit());
                     } else {
-                        let max2 = 2;
+                        // TODO:CLEAN
+                        let max2 = 3;
                         let repair_or_build = rnd_source_idx(max2);
-                        // we need this change because otherwise we will repair walls infinetly
+                        // we need this chance because otherwise we will repair walls infinetly
                         if repair_or_build < 1 {
                             // REPAIR
                             let object = room
                                 .find(find::STRUCTURES)
                                 .into_iter()
                                 .filter(|o| o.as_attackable().is_some())
-                                .filter(|o| {
-                                    o.structure_type() != screeps::StructureType::Controller
-                                })
+                                .filter(|o| o.structure_type() != StructureType::Controller)
                                 .filter(|o| {
                                     o.as_attackable().unwrap().hits()
                                         < o.as_attackable().unwrap().hits_max() / 3
                                 })
                                 .reduce(|fewer_hp_obj, next_obj| {
-                                    info!("(reduce) {:?}", next_obj.structure_type());
                                     // here we are sure we only have only attackables
                                     if let Some(next_attackable) = next_obj.as_attackable() {
                                         if let Some(fewer_hp_atttackble) =
@@ -339,31 +382,50 @@ impl<'a> Creep<'a> {
                                 }
                             }
                         } else {
-                            // Upgrade RANDOM CONSTRUCTION SITE but Controller
-                            let site = self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
-                            match site {
-                                Some(val) => match val.structure_type() {
-                                    screeps::StructureType::Controller => {
-                                        if let Some(controller) = room.controller() {
+                            let max2 = 2;
+                            let build_controller_or_other = rnd_source_idx(max2);
+                            // we need this chance because otherwise we will repair everything but the
+                            // controller since it's very improbably that a creep will be near a
+                            // controller
+                            // TODO: CLEAN
+                            if build_controller_or_other < 1 {
+                                // Upgrade RANDOM CONSTRUCTION SITE but Controller
+                                let site =
+                                    self.pos().find_closest_by_path(find::CONSTRUCTION_SITES);
+                                match site {
+                                    Some(val) => match val.structure_type() {
+                                        StructureType::Controller => {
+                                            if let Some(controller) = room.controller() {
+                                                creep_targets.insert(
+                                                    name,
+                                                    CreepTarget::UpgradeController(controller.id()),
+                                                );
+                                            } else {
+                                                warn!("could not find controller");
+                                                return;
+                                            }
+                                        }
+                                        _ => {
                                             creep_targets.insert(
                                                 name,
-                                                CreepTarget::UpgradeController(controller.id()),
+                                                CreepTarget::UpgradeConstructionSite(val),
                                             );
-                                        } else {
-                                            warn!("could not find controller");
                                             return;
                                         }
+                                    },
+                                    None => {
+                                        warn!("could not find counstruction site");
                                     }
-                                    _ => {
-                                        creep_targets.insert(
-                                            name,
-                                            CreepTarget::UpgradeConstructionSite(val),
-                                        );
-                                        return;
-                                    }
-                                },
-                                None => {
-                                    warn!("could not find counstruction site");
+                                }
+                            } else {
+                                if let Some(controller) = room.controller() {
+                                    creep_targets.insert(
+                                        name,
+                                        CreepTarget::UpgradeController(controller.id()),
+                                    );
+                                } else {
+                                    warn!("could not find controller");
+                                    return;
                                 }
                             }
                         }
@@ -437,10 +499,17 @@ impl<'a> Harvester<'a> {
             Some(source) => {
                 if self.creep.pos().is_near_to(source.pos()) {
                     let r = self.creep.harvest(&source);
-                    if r != ReturnCode::Ok {
-                        warn!("couldn't harvest: {:?}", r);
+                    match r {
+                        ReturnCode::Ok => true,
+                        ReturnCode::NotEnough => {
+                            info!("couldn't harvest: {:?}", r);
+                            false
+                        }
+                        _ => {
+                            warn!("couldn't harvest: {:?}", r);
+                            false
+                        }
                     }
-                    true
                 } else {
                     self.creep.move_to(&source);
                     true
@@ -453,14 +522,44 @@ impl<'a> Harvester<'a> {
     pub fn find_deposit(&self) -> Option<StructureObject> {
         let room = self.creep.room().unwrap();
         let spawns = room.find(find::MY_SPAWNS);
+        let positions = Vec::<RoomPosition>::new();
+        let creep_pos = self.creep.pos();
 
         let spawn = spawns
             .iter()
             .filter(|s| s.store().get_free_capacity(Some(ResourceType::Energy)) > 0)
             .last();
+        let structures = room.find(find::MY_STRUCTURES);
+        let storage = room.storage();
+        let container_obj = structures
+            .iter()
+            .filter(|s| s.structure_type() == StructureType::Container)
+            .filter(|s| {
+                s.as_has_store()
+                    .unwrap()
+                    .store()
+                    .get_free_capacity(Some(ResourceType::Energy))
+                    > 0
+            })
+            .reduce(|closer, next| {
+                if closer.pos().get_range_to(creep_pos) > next.pos().get_range_to(creep_pos) {
+                    next
+                } else {
+                    closer
+                }
+            });
+        if let Some(ext) = self.creep.find_unfilled_extension() {
+            ext.id();
+        }
 
-        let creep_pos = self.creep.pos();
+        let mut container: StructureContainer;
+        if let Some(obj) = container_obj {
+            container = obj_to_container(obj).unwrap();
+        }
 
+        // Find which it's closer, the spawn or extension.
+        // If there aren't none of them available, store it in the storage
+        // TODO: Add container
         if let Some(ext) = self.creep.find_unfilled_extension() {
             if let Some(s) = spawn {
                 if ext.pos().get_range_to(creep_pos) < s.pos().get_range_to(creep_pos) {
@@ -475,7 +574,11 @@ impl<'a> Harvester<'a> {
             if let Some(s) = spawn {
                 Some(StructureObject::StructureSpawn(s.clone()))
             } else {
-                None
+                if let Some(s) = storage {
+                    Some(StructureObject::StructureStorage(s))
+                } else {
+                    None
+                }
             }
         }
     }
@@ -513,12 +616,13 @@ impl<'a> Harvester<'a> {
                     }
                 }
             } else {
+                self.creep.say("DEPOSIT", false);
                 let r = self.creep.move_to(&target);
                 match r {
                     ReturnCode::Ok => DepositCode::NotNear,
 
                     ReturnCode::Tired => {
-                        self.creep.say("got tired", false);
+                        self.creep.say("TIRED", false);
                         DepositCode::NotNear
                     }
                     _ => {
@@ -537,7 +641,7 @@ pub fn find_tower(room: Room) -> Option<StructureTower> {
     let structures = room.find(find::MY_STRUCTURES);
     let tower_obj = structures
         .into_iter()
-        .filter(|s| s.structure_type() == screeps::StructureType::Tower)
+        .filter(|s| s.structure_type() == StructureType::Tower)
         .filter(|t| {
             t.as_has_store()
                 .unwrap()
@@ -546,7 +650,6 @@ pub fn find_tower(room: Room) -> Option<StructureTower> {
                 > 0
         })
         .reduce(|res, next_t| {
-            info!("(reduce) {:?}", res.structure_type());
             if next_t
                 .as_has_store()
                 .unwrap()
@@ -575,6 +678,16 @@ pub fn find_tower(room: Room) -> Option<StructureTower> {
         },
         None => {
             info!("towers seem ok");
+            None
+        }
+    }
+}
+
+pub fn obj_to_container(obj: &StructureObject) -> Option<StructureContainer> {
+    match obj {
+        StructureObject::StructureContainer(c) => Some(c.clone()),
+        _ => {
+            warn!("expected a container");
             None
         }
     }

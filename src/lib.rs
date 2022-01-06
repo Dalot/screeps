@@ -8,12 +8,14 @@ use screeps::{
     Source, StructureObject,
 };
 use storage::*;
+use tower::*;
 use wasm_bindgen::prelude::*;
 
 mod creep;
 mod logging;
 mod role;
 mod storage;
+mod tower;
 
 // add wasm_bindgen to any function you would like to expose for call from js
 #[wasm_bindgen]
@@ -25,19 +27,35 @@ pub fn setup() {
 #[wasm_bindgen(js_name = loop)]
 pub fn game_loop() {
     debug!("loop starting! CPU: {}", game::cpu::get_used());
-    let mut harvest_sources = HashMap::<ObjectId<Source>, (usize, String)>::new();
-    CREEPS_TARGET.with(|creep_targets_refcell| {
-        let mut creep_targets = creep_targets_refcell.borrow_mut();
-        debug!("running creeps");
+    CREEPS_TARGET.with(|creeps_target_refcell| {
+        let mut creeps_target = creeps_target_refcell.borrow_mut();
         for creep in game::creeps().values() {
             let creep = Creep::new(&creep);
-            creep.run_creep(&mut creep_targets);
+            creep.run(&mut creeps_target);
         }
     });
-    // CREEPS_ROLE.with(|creep_role_refcell| {
-    //     let mut creep_roles = creep_role_refcell.borrow_mut();
-    //     for (creep_name, role) in creep_roles.iter() {}
-    // });
+    TOWERS_TARGET.with(|towers_target_refcell| {
+        let mut towers_target = towers_target_refcell.borrow_mut();
+        for room in game::rooms().values() {
+            let structures = room.find(find::MY_STRUCTURES);
+            let towers: Vec<&StructureObject> = structures
+                .iter()
+                .filter(|s| s.structure_type() == screeps::StructureType::Tower)
+                .collect();
+            let hostiles = room.find(find::HOSTILE_CREEPS);
+            for tower in towers {
+                match tower {
+                    StructureObject::StructureTower(screeps_t) => {
+                        let t = Tower::new(screeps_t);
+                        t.run(&mut towers_target, hostiles.clone());
+                    }
+                    _ => {
+                        warn!("expected a tower here");
+                    }
+                }
+            }
+        }
+    });
 
     debug!("running spawns");
     // Game::spawns returns a `js_sys::Object`, which is a light reference to an
@@ -89,33 +107,33 @@ pub fn game_loop() {
         }
     }
 
-    for room in game::rooms().values() {
-        let hostiles = room.find(find::HOSTILE_CREEPS);
-        if hostiles.len() == 0 {
-            break;
-        }
-        let structures = room.find(find::MY_STRUCTURES);
-        let towers: Vec<&StructureObject> = structures
-            .iter()
-            .filter(|s| s.structure_type() == screeps::StructureType::Tower)
-            .collect();
+    // for room in game::rooms().values() {
+    //     let hostiles = room.find(find::HOSTILE_CREEPS);
+    //     if hostiles.len() == 0 {
+    //         break;
+    //     }
+    //     let structures = room.find(find::MY_STRUCTURES);
+    //     let towers: Vec<&StructureObject> = structures
+    //         .iter()
+    //         .filter(|s| s.structure_type() == screeps::StructureType::Tower)
+    //         .collect();
 
-        for h in hostiles.iter() {
-            for t in towers.iter() {
-                match t {
-                    StructureObject::StructureTower(t) => {
-                        let r = t.attack(h);
-                        if r != ReturnCode::Ok {
-                            warn!("couldn't attack: {:?}", r);
-                        }
-                    }
-                    _ => {
-                        warn!("something went wrong on filtering towers")
-                    }
-                }
-            }
-        }
-    }
+    //     for h in hostiles.iter() {
+    //         for t in towers.iter() {
+    //             match t {
+    //                 StructureObject::StructureTower(t) => {
+    //                     let r = t.attack(h);
+    //                     if r != ReturnCode::Ok {
+    //                         warn!("couldn't attack: {:?}", r);
+    //                     }
+    //                 }
+    //                 _ => {
+    //                     warn!("something went wrong on filtering towers")
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     if false {
         for room in game::rooms().values() {
