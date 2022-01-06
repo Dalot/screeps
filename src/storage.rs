@@ -1,6 +1,6 @@
 use crate::role::Role;
 use screeps::{
-    Attackable, ConstructionSite, ObjectId, Position, Resource, Source, Structure,
+    Attackable, ConstructionSite, Healable, ObjectId, Position, Resource, Source, Structure,
     StructureController, StructureTower,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub enum CreepTarget {
 // this enum will represent a creep's lock on a specific target object, storing a js reference to the object id so that we can grab a fresh reference to the object each successive tick, since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
 pub enum TowerTarget {
     Attack(Box<dyn Attackable>),
-    //Heal(?),
+    Heal(Box<dyn Healable>),
     Repair(ObjectId<Structure>),
 }
 #[derive(Debug, Serialize, Deserialize)]
