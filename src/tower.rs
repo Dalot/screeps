@@ -45,6 +45,12 @@ impl<'a> Tower<'a> {
             Some(tower_target) => match &tower_target {
                 TowerTarget::Repair(structure_id) => match structure_id.resolve() {
                     Some(obj) => {
+                        if self.store().get_free_capacity(Some(ResourceType::Energy))
+                            > self.store().get_capacity(Some(ResourceType::Energy)) as i32 / 2
+                        {
+                            //used too much energy already, need to save in case of an attack
+                            towers_target.remove(&tower_pos);
+                        }
                         if obj.hits() == obj.hits_max() {
                             towers_target.remove(&tower_pos);
                         }

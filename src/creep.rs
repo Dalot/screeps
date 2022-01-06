@@ -124,7 +124,7 @@ impl<'a> Creep<'a> {
             None
         }
     }
-    pub fn run(&self, creep_targets: &mut HashMap<String, CreepTarget>) {
+    pub fn run(&self, creep_targets: &mut HashMap<String, CreepTarget>, has_hostiles: bool) {
         let name = self.name();
         if self.spawning() {
             return;
@@ -219,7 +219,7 @@ impl<'a> Creep<'a> {
                 CreepTarget::Deposit() => {
                     let harvester = Harvester { creep: self };
                     let creeps: Vec<screeps::Creep> = game::creeps().values().collect();
-                    if creeps.len() > 6 {
+                    if creeps.len() > 10 || has_hostiles {
                         if let Some(t) = find_tower(room) {
                             if DepositCode::Done == harvester.deposit(t) {
                                 creep_targets.remove(&name);

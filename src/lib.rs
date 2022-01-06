@@ -31,18 +31,19 @@ pub fn game_loop() {
         let mut creeps_target = creeps_target_refcell.borrow_mut();
         for creep in game::creeps().values() {
             let creep = Creep::new(&creep);
-            creep.run(&mut creeps_target);
+            let hostiles = creep.room().unwrap().find(find::HOSTILE_CREEPS);
+            creep.run(&mut creeps_target, hostiles.len() > 0);
         }
     });
     TOWERS_TARGET.with(|towers_target_refcell| {
         let mut towers_target = towers_target_refcell.borrow_mut();
         for room in game::rooms().values() {
+            let hostiles = room.find(find::HOSTILE_CREEPS);
             let structures = room.find(find::MY_STRUCTURES);
             let towers: Vec<&StructureObject> = structures
                 .iter()
                 .filter(|s| s.structure_type() == screeps::StructureType::Tower)
                 .collect();
-            let hostiles = room.find(find::HOSTILE_CREEPS);
             for tower in towers {
                 match tower {
                     StructureObject::StructureTower(screeps_t) => {
@@ -78,7 +79,7 @@ pub fn game_loop() {
         // Part::Tough => 10,
         // Part::Heal => 250,
         // Part::Claim => 600,
-        // 13 part is costing us -> 850
+        // 15 part is costing us -> 1000
         let body = [
             Part::Carry,
             Part::Carry,
@@ -87,12 +88,13 @@ pub fn game_loop() {
             Part::Work,
             Part::Work,
             Part::Work,
+            Part::Work,
             Part::Move,
             Part::Move,
             Part::Move,
             Part::Move,
             Part::Move,
-            // Part::Move,
+            Part::Move,
             Part::Move,
         ];
         if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
