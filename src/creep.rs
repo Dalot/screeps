@@ -1,9 +1,10 @@
-use crate::storage::*;
+use crate::{roles::harvester::Harvester, roles::role::Role, storage::*};
 use log::*;
 use screeps::{
-    find, game, prelude::*, rooms, ConstructionSite, ObjectId, Part, ResourceType, ReturnCode,
-    Room, RoomObject, RoomObjectProperties, RoomPosition, Source, StructureContainer,
-    StructureController, StructureExtension, StructureObject, StructureTower, StructureType,
+    find, game, prelude::*, rooms, ConstructionSite, MoveToOptions, ObjectId, Part, PolyStyle,
+    Resource, ResourceType, ReturnCode, Room, RoomObject, RoomObjectProperties, RoomPosition,
+    Source, StructureContainer, StructureController, StructureExtension, StructureObject,
+    StructureTower, StructureType,
 };
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -13,12 +14,34 @@ use wasm_bindgen::prelude::*;
 // Haulers will transport energy from containers to storage/spawn/extension
 // Builders will upgrade and repair things
 
+#[derive(PartialEq)]
+pub enum DepositCode {
+    Done = 0,
+    NotNear = 1,
+    Full = 2,
+    Error = 3,
+    NotDone = 4,
+}
 pub struct Creep<'a> {
     inner_creep: &'a screeps::Creep,
+    role: Role,
 }
 impl<'a> Creep<'a> {
     pub fn new(creep: &'a screeps::Creep) -> Self {
-        Self { inner_creep: creep }
+        Self {
+            inner_creep: creep,
+            role: Role::General,
+        }
+    }
+    pub fn set_role(&mut self, role: Option<Role>) {
+        if let Some(r) = role {
+            self.role = r;
+        } else {
+            self.role = Role::General;
+        }
+    }
+    pub fn role(&self) -> &Role {
+        &self.role
     }
     pub fn name(&self) -> String {
         self.inner_creep.name()
@@ -41,11 +64,23 @@ impl<'a> Creep<'a> {
     pub fn repair(&self, target: &RoomObject) -> ReturnCode {
         self.inner_creep.repair(target)
     }
+    pub fn pickup(&self, target: &Resource) -> ReturnCode {
+        self.inner_creep.pickup(target)
+    }
     pub fn move_to<T>(&self, target: T) -> ReturnCode
     where
         T: HasPosition,
     {
-        self.inner_creep.move_to(target)
+        let mut options = MoveToOptions::new();
+        let mut poly_style = PolyStyle::default();
+        poly_style = poly_style
+            .fill("transparent")
+            .opacity(0.1)
+            .stroke("#fff")
+            .stroke_width(0.15)
+            .line_style(screeps::LineDrawStyle::Dashed);
+        options = options.visualize_path_style(poly_style);
+        self.inner_creep.move_to_with_options(target, Some(options))
     }
     pub fn harvest<T>(&self, target: &T) -> ReturnCode
     where
@@ -58,7 +93,7 @@ impl<'a> Creep<'a> {
     }
     pub fn transfer<T>(&self, target: &T, ty: ResourceType, amount: Option<u32>) -> ReturnCode
     where
-        T: Transferable,
+        T: Transferable + ?Sized,
     {
         self.inner_creep.transfer(target, ty, amount)
     }
@@ -124,6 +159,112 @@ impl<'a> Creep<'a> {
             None
         }
     }
+
+    fn deposit<T>(&self, target: T) -> DepositCode
+    where
+        T: Transferable + HasStore,
+    {
+        if self.store().get_used_capacity(Some(ResourceType::Energy)) > 0 {
+            if self.pos().is_near_to(target.pos()) {
+                let value_to_transfer = self.get_value_to_transfer(&target.store());
+                let r = self.transfer(&target, ResourceType::Energy, Some(value_to_transfer));
+                info!("deposit code: {:?}", r);
+                match r {
+                    ReturnCode::Ok => {
+                        info!("deposited {}", value_to_transfer);
+                        DepositCode::NotDone
+                    }
+                    ReturnCode::Full => {
+                        info!("deposit is full");
+                        DepositCode::Full
+                    }
+                    _ => {
+                        warn!("could not deposit energy, {:?}", r);
+                        DepositCode::Error
+                    }
+                }
+            } else {
+                let r = self.move_to(&target);
+                match r {
+                    ReturnCode::Ok => DepositCode::NotNear,
+
+                    ReturnCode::Tired => {
+                        self.say("TIRED", false);
+                        DepositCode::NotNear
+                    }
+                    _ => {
+                        warn!("(deposit) could not move to target code: {:?}", r);
+                        DepositCode::Error
+                    }
+                }
+            }
+        } else {
+            DepositCode::Done
+        }
+    }
+    fn find_deposit(&self) -> Option<StructureObject> {
+        let room = self.room().unwrap();
+        let spawns = room.find(find::MY_SPAWNS);
+        let positions = Vec::<RoomPosition>::new();
+        let creep_pos = self.pos();
+
+        let spawn = spawns
+            .iter()
+            .filter(|s| s.store().get_free_capacity(Some(ResourceType::Energy)) > 0)
+            .last();
+        let structures = room.find(find::MY_STRUCTURES);
+        let storage = room.storage();
+        let container_obj = structures
+            .iter()
+            .filter(|s| s.structure_type() == StructureType::Container)
+            .filter(|s| {
+                s.as_has_store()
+                    .unwrap()
+                    .store()
+                    .get_free_capacity(Some(ResourceType::Energy))
+                    > 0
+            })
+            .reduce(|closer, next| {
+                if closer.pos().get_range_to(creep_pos) > next.pos().get_range_to(creep_pos) {
+                    next
+                } else {
+                    closer
+                }
+            });
+        if let Some(ext) = self.find_unfilled_extension() {
+            ext.id();
+        }
+
+        let mut container: StructureContainer;
+        if let Some(obj) = container_obj {
+            container = obj_to_container(obj).unwrap();
+        }
+
+        // Find which it's closer, the spawn or extension.
+        // If there aren't none of them available, store it in the storage
+        // TODO: Add container
+        if let Some(ext) = self.find_unfilled_extension() {
+            if let Some(s) = spawn {
+                if ext.pos().get_range_to(creep_pos) < s.pos().get_range_to(creep_pos) {
+                    Some(StructureObject::StructureExtension(ext))
+                } else {
+                    Some(StructureObject::StructureSpawn(s.clone()))
+                }
+            } else {
+                Some(StructureObject::StructureExtension(ext))
+            }
+        } else {
+            if let Some(s) = spawn {
+                Some(StructureObject::StructureSpawn(s.clone()))
+            } else {
+                if let Some(s) = storage {
+                    Some(StructureObject::StructureStorage(s))
+                } else {
+                    None
+                }
+            }
+        }
+    }
     pub fn run(&self, creep_targets: &mut HashMap<String, CreepTarget>, has_hostiles: bool) {
         let name = self.name();
         if self.spawning() {
@@ -143,7 +284,6 @@ impl<'a> Creep<'a> {
                                     //inside
                                     let _ = self.harvest(&source);
                                 } else {
-                                    self.say("HARVEST", false);
                                     self.move_to(&source);
                                 }
                             }
@@ -172,10 +312,8 @@ impl<'a> Creep<'a> {
                                         creep_targets.remove(&name);
                                     }
                                     ReturnCode::NotInRange => {
-                                        self.say("BUILD", false);
                                         r = self.move_to(&site);
                                         if r == ReturnCode::Tired {
-                                            self.say("TIRED", false);
                                         } else if r != ReturnCode::Ok {
                                             warn!("could not move to site code: {:?}", r);
                                         }
@@ -200,7 +338,6 @@ impl<'a> Creep<'a> {
                                 }
                                 let r = self.repair(&obj);
                                 if r == ReturnCode::NotInRange {
-                                    self.say("REPAIR", false);
                                     self.move_to(&obj);
                                 } else if r != ReturnCode::Ok {
                                     warn!("couldn't repair: {:?}", r);
@@ -217,31 +354,30 @@ impl<'a> Creep<'a> {
                     }
                 }
                 CreepTarget::Deposit() => {
-                    let harvester = Harvester { creep: self };
                     let creeps: Vec<screeps::Creep> = game::creeps().values().collect();
-                    if creeps.len() > 10 || has_hostiles {
+                    if creeps.len() > 10 || (has_hostiles && creeps.len() > 5) {
                         if let Some(t) = find_tower(room) {
-                            if DepositCode::Done == harvester.deposit(t) {
+                            if DepositCode::Done == self.deposit(t) {
                                 creep_targets.remove(&name);
                             }
                             return;
                         }
                     }
-                    let deposit = harvester.find_deposit();
+                    let deposit = self.find_deposit();
                     if let Some(val) = deposit {
                         match val {
                             StructureObject::StructureExtension(ext) => {
-                                if DepositCode::Done == harvester.deposit(ext) {
+                                if DepositCode::Done == self.deposit(ext) {
                                     creep_targets.remove(&name);
                                 }
                             }
                             StructureObject::StructureSpawn(s) => {
-                                if DepositCode::Done == harvester.deposit(s) {
+                                if DepositCode::Done == self.deposit(s) {
                                     creep_targets.remove(&name);
                                 }
                             }
                             StructureObject::StructureStorage(s) => {
-                                if DepositCode::Done == harvester.deposit(s) {
+                                if DepositCode::Done == self.deposit(s) {
                                     creep_targets.remove(&name);
                                 }
                             }
@@ -259,7 +395,6 @@ impl<'a> Creep<'a> {
                             Some(controller) => {
                                 let mut r = self.upgrade_controller(&controller);
                                 if r == ReturnCode::NotInRange {
-                                    self.say("CONTROLLER", false);
                                     r = self.move_to(&controller);
                                     match r {
                                         ReturnCode::Ok => {}
@@ -312,6 +447,16 @@ impl<'a> Creep<'a> {
                 }
             },
             None => {
+                match self.role() {
+                    Role::Harvester => {
+                        let harvester = Harvester { creep: self };
+                        harvester.run();
+                        return;
+                    }
+                    Role::Hauler => todo!(),
+                    _ => {}
+                }
+
                 // no target, let's find one depending on if we have energy
                 if self.store().get_free_capacity(Some(ResourceType::Energy)) > 0 {
                     let drop = self.pos().find_closest_by_path(find::DROPPED_RESOURCES);
@@ -332,7 +477,7 @@ impl<'a> Creep<'a> {
                     // Upgrade controller, build shit or deposit in a spawn or extension
                     let max = 10;
                     let rnd_number = rnd_source_idx(max);
-                    if rnd_number < 3 {
+                    if rnd_number < 8 {
                         creep_targets.insert(name, CreepTarget::Deposit());
                     } else {
                         // TODO:CLEAN
@@ -440,203 +585,6 @@ fn rnd_source_idx(max: usize) -> usize {
     js_sys::Math::floor(js_sys::Math::random() * max as f64) as usize
 }
 
-pub enum BodyType {
-    HARVESTER,
-    HAULER,
-}
-
-impl BodyType {
-    pub fn body(&self) -> Vec<Part> {
-        match self {
-            BodyType::HARVESTER => {
-                vec![
-                    Part::Carry,
-                    Part::Work,
-                    Part::Work,
-                    Part::Work,
-                    Part::Work,
-                    Part::Work,
-                    Part::Move,
-                ]
-            }
-            BodyType::HAULER => {
-                vec![
-                    Part::Carry,
-                    Part::Carry,
-                    Part::Carry,
-                    Part::Move,
-                    Part::Move,
-                    Part::Move,
-                    Part::Move,
-                    Part::Move,
-                    Part::Move,
-                ]
-            }
-        }
-    }
-}
-pub trait CanHarvest {
-    fn harvest(&self, source_id: ObjectId<Source>) -> bool;
-}
-pub trait CanDeposit {
-    fn find_deposit(&self) -> Option<StructureObject>;
-    fn deposit<T>(&self, target: T) -> bool;
-}
-#[derive(PartialEq)]
-pub enum DepositCode {
-    Done = 0,
-    NotNear = 1,
-    Full = 2,
-    Error = 3,
-    NotDone = 4,
-}
-struct Harvester<'a> {
-    pub creep: &'a Creep<'a>,
-}
-impl<'a> Harvester<'a> {
-    pub fn harvest(&self, source_id: ObjectId<Source>) -> bool {
-        return match source_id.resolve() {
-            Some(source) => {
-                if self.creep.pos().is_near_to(source.pos()) {
-                    let r = self.creep.harvest(&source);
-                    match r {
-                        ReturnCode::Ok => true,
-                        ReturnCode::NotEnough => {
-                            info!("couldn't harvest: {:?}", r);
-                            false
-                        }
-                        _ => {
-                            warn!("couldn't harvest: {:?}", r);
-                            false
-                        }
-                    }
-                } else {
-                    self.creep.move_to(&source);
-                    true
-                }
-            }
-            None => false,
-        };
-    }
-
-    pub fn find_deposit(&self) -> Option<StructureObject> {
-        let room = self.creep.room().unwrap();
-        let spawns = room.find(find::MY_SPAWNS);
-        let positions = Vec::<RoomPosition>::new();
-        let creep_pos = self.creep.pos();
-
-        let spawn = spawns
-            .iter()
-            .filter(|s| s.store().get_free_capacity(Some(ResourceType::Energy)) > 0)
-            .last();
-        let structures = room.find(find::MY_STRUCTURES);
-        let storage = room.storage();
-        let container_obj = structures
-            .iter()
-            .filter(|s| s.structure_type() == StructureType::Container)
-            .filter(|s| {
-                s.as_has_store()
-                    .unwrap()
-                    .store()
-                    .get_free_capacity(Some(ResourceType::Energy))
-                    > 0
-            })
-            .reduce(|closer, next| {
-                if closer.pos().get_range_to(creep_pos) > next.pos().get_range_to(creep_pos) {
-                    next
-                } else {
-                    closer
-                }
-            });
-        if let Some(ext) = self.creep.find_unfilled_extension() {
-            ext.id();
-        }
-
-        let mut container: StructureContainer;
-        if let Some(obj) = container_obj {
-            container = obj_to_container(obj).unwrap();
-        }
-
-        // Find which it's closer, the spawn or extension.
-        // If there aren't none of them available, store it in the storage
-        // TODO: Add container
-        if let Some(ext) = self.creep.find_unfilled_extension() {
-            if let Some(s) = spawn {
-                if ext.pos().get_range_to(creep_pos) < s.pos().get_range_to(creep_pos) {
-                    Some(StructureObject::StructureExtension(ext))
-                } else {
-                    Some(StructureObject::StructureSpawn(s.clone()))
-                }
-            } else {
-                Some(StructureObject::StructureExtension(ext))
-            }
-        } else {
-            if let Some(s) = spawn {
-                Some(StructureObject::StructureSpawn(s.clone()))
-            } else {
-                if let Some(s) = storage {
-                    Some(StructureObject::StructureStorage(s))
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// Can return false when it's not done with deposit everything
-    /// or because it failed for some reason which should be logged
-    pub fn deposit<T>(&self, target: T) -> DepositCode
-    where
-        T: Transferable + HasStore,
-    {
-        if self
-            .creep
-            .store()
-            .get_used_capacity(Some(ResourceType::Energy))
-            > 0
-        {
-            if self.creep.pos().is_near_to(target.pos()) {
-                let value_to_transfer = self.creep.get_value_to_transfer(&target.store());
-                let r = self
-                    .creep
-                    .transfer(&target, ResourceType::Energy, Some(value_to_transfer));
-                info!("deposit code: {:?}", r);
-                match r {
-                    ReturnCode::Ok => {
-                        info!("deposited {}", value_to_transfer);
-                        DepositCode::NotDone
-                    }
-                    ReturnCode::Full => {
-                        info!("deposit is full");
-                        DepositCode::Full
-                    }
-                    _ => {
-                        warn!("could not deposit energy, {:?}", r);
-                        DepositCode::Error
-                    }
-                }
-            } else {
-                self.creep.say("DEPOSIT", false);
-                let r = self.creep.move_to(&target);
-                match r {
-                    ReturnCode::Ok => DepositCode::NotNear,
-
-                    ReturnCode::Tired => {
-                        self.creep.say("TIRED", false);
-                        DepositCode::NotNear
-                    }
-                    _ => {
-                        warn!("(deposit) could not move to target code: {:?}", r);
-                        DepositCode::Error
-                    }
-                }
-            }
-        } else {
-            DepositCode::Done
-        }
-    }
-}
-
 pub fn find_tower(room: Room) -> Option<StructureTower> {
     let structures = room.find(find::MY_STRUCTURES);
     let tower_obj = structures
@@ -647,7 +595,7 @@ pub fn find_tower(room: Room) -> Option<StructureTower> {
                 .unwrap()
                 .store()
                 .get_free_capacity(Some(ResourceType::Energy))
-                > 0
+                > 150
         })
         .reduce(|res, next_t| {
             if next_t

@@ -14,6 +14,7 @@ use wasm_bindgen::prelude::*;
 mod creep;
 mod logging;
 mod role;
+mod roles;
 mod storage;
 mod tower;
 
@@ -26,15 +27,45 @@ pub fn setup() {
 // to use a reserved name as a function name, use `js_name`:
 #[wasm_bindgen(js_name = loop)]
 pub fn game_loop() {
-    debug!("loop starting! CPU: {}", game::cpu::get_used());
+    let time = screeps::game::time();
+
+    if time % 32 == 3 {
+        let mut db = Database::init().expect("could not init database");
+        db.assign_roles();
+        info!("running memory cleanup");
+        db.clean_up();
+    }
+
+    let mut creeps_role_map = HashMap::<String, Role>::new();
+    // If a creep does not have a role, find the appropriate role and add it to the local storage
+    CREEPS_ROLE.with(|creeps_role_refcell| {
+        let mut creeps_role = creeps_role_refcell.borrow_mut();
+        for creep in game::creeps().values() {
+            let creep_name = creep.name();
+            if let Some(r) = creeps_role.get(&creep.name()) {
+                creeps_role_map.insert(creep_name, r.clone());
+            } else {
+                let role = Role::find_role(&creep);
+                if let Some(r) = role {
+                    creeps_role.insert(creep_name, r);
+                } else {
+                    creeps_role.insert(creep_name, Role::General);
+                }
+            }
+        }
+    });
+
     CREEPS_TARGET.with(|creeps_target_refcell| {
         let mut creeps_target = creeps_target_refcell.borrow_mut();
         for creep in game::creeps().values() {
-            let creep = Creep::new(&creep);
+            let mut creep = Creep::new(&creep);
+            let r = creeps_role_map.get(&creep.name()).cloned();
+            creep.set_role(r);
             let hostiles = creep.room().unwrap().find(find::HOSTILE_CREEPS);
             creep.run(&mut creeps_target, hostiles.len() > 0);
         }
     });
+
     TOWERS_TARGET.with(|towers_target_refcell| {
         let mut towers_target = towers_target_refcell.borrow_mut();
         for room in game::rooms().values() {
@@ -58,7 +89,6 @@ pub fn game_loop() {
         }
     });
 
-    debug!("running spawns");
     // Game::spawns returns a `js_sys::Object`, which is a light reference to an
     // object of any kind which is held on the javascript heap.
     //
@@ -97,66 +127,32 @@ pub fn game_loop() {
             Part::Move,
             Part::Move,
         ];
-        if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
-            let name_base = game::time();
-            let name = format!("{}-{}", name_base, additional);
-            let res = spawn.spawn_creep(&body, &name);
-            if res != ReturnCode::Ok {
-                warn!("couldn't spawn: {:?}", res);
-            } else {
-                additional += 1;
+        let name_base = game::time();
+        let name = format!("{}-{}", name_base, additional);
+        if let Some(role_needed) = Role::find_role_to_spawn(&creeps_role_map) {
+            let b = role_needed.get_body();
+            if spawn.room().unwrap().energy_available() >= b.iter().map(|p| p.cost()).sum() {
+                let res = spawn.spawn_creep(&body, &name);
+                if res != ReturnCode::Ok {
+                    warn!("couldn't spawn: {:?}", res);
+                } else {
+                    additional += 1;
+                }
+            }
+            continue;
+        } else {
+            // TODO: Have a phase on the game that will influence the body part
+            if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
+                let res = spawn.spawn_creep(&body, &name);
+                if res != ReturnCode::Ok {
+                    warn!("couldn't spawn: {:?}", res);
+                } else {
+                    additional += 1;
+                }
             }
         }
     }
 
-    // for room in game::rooms().values() {
-    //     let hostiles = room.find(find::HOSTILE_CREEPS);
-    //     if hostiles.len() == 0 {
-    //         break;
-    //     }
-    //     let structures = room.find(find::MY_STRUCTURES);
-    //     let towers: Vec<&StructureObject> = structures
-    //         .iter()
-    //         .filter(|s| s.structure_type() == screeps::StructureType::Tower)
-    //         .collect();
-
-    //     for h in hostiles.iter() {
-    //         for t in towers.iter() {
-    //             match t {
-    //                 StructureObject::StructureTower(t) => {
-    //                     let r = t.attack(h);
-    //                     if r != ReturnCode::Ok {
-    //                         warn!("couldn't attack: {:?}", r);
-    //                     }
-    //                 }
-    //                 _ => {
-    //                     warn!("something went wrong on filtering towers")
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-
-    if false {
-        for room in game::rooms().values() {
-            let sources = room.find(find::SOURCES_ACTIVE);
-            for source in sources.iter() {
-                let pos = source.pos();
-                let nearby_creeps = room.look_for_at_xy(look::CREEPS, pos.x().u8(), pos.y().u8());
-                // let nearby_creeps = room.look_at
-                // if nearby_creeps.len() > 0 {}
-            }
-        }
-    }
-
-    let time = screeps::game::time();
-
-    if time % 32 == 3 {
-        let mut db = Database::init().expect("could not init database");
-        db.assign_roles();
-        info!("running memory cleanup");
-        db.clean_up();
-    }
     info!("done! cpu: {}", game::cpu::get_used())
 }
 

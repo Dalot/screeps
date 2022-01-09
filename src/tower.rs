@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::storage::*;
 use log::*;
 use screeps::{
-    find, Attackable, Creep as ScreepsCreep, HasTypedId, MaybeHasNativeId, Position, ResourceType,
-    ReturnCode, Room, RoomPosition, Store, Structure, StructureProperties, StructureTower,
-    StructureType,
+    find, game, Attackable, Creep as ScreepsCreep, HasTypedId, MaybeHasNativeId, Part, Position,
+    ResourceType, ReturnCode, Room, RoomPosition, Store, Structure, StructureProperties,
+    StructureTower, StructureType,
 };
 pub struct Tower<'a> {
     inner_tower: &'a StructureTower,
@@ -39,6 +39,7 @@ impl<'a> Tower<'a> {
     ) {
         let room = self.room().unwrap();
         let tower_pos = self.pos();
+        let creeps: Vec<ScreepsCreep> = game::creeps().values().collect();
 
         let target = towers_target.get(&self.pos());
         match target {
@@ -47,6 +48,7 @@ impl<'a> Tower<'a> {
                     Some(obj) => {
                         if self.store().get_free_capacity(Some(ResourceType::Energy))
                             > self.store().get_capacity(Some(ResourceType::Energy)) as i32 / 2
+                            && creeps.len() < 12
                         {
                             //used too much energy already, need to save in case of an attack
                             towers_target.remove(&tower_pos);
@@ -77,52 +79,63 @@ impl<'a> Tower<'a> {
             None => {
                 if hostiles.len() > 0 {
                     for h in hostiles.iter() {
-                        towers_target.insert(self.pos(), TowerTarget::Attack(Box::new(h.clone())));
+                        let mut found = false;
+                        for body in h.body().iter() {
+                            if body.part() == Part::Heal {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            towers_target
+                                .insert(self.pos(), TowerTarget::Attack(Box::new(h.clone())));
+                            return;
+                        }
                     }
-                } else {
-                    if self.store().get_free_capacity(Some(ResourceType::Energy))
-                        > self.store().get_capacity(Some(ResourceType::Energy)) as i32 / 2
-                    {
-                        //used too much energy already, need to save in case of an attack
-                        return;
-                    }
-                    let object = room
-                        .find(find::STRUCTURES)
-                        .into_iter()
-                        .filter(|o| o.as_attackable().is_some())
-                        .filter(|o| o.structure_type() != StructureType::Controller)
-                        .filter(|o| {
-                            o.as_attackable().unwrap().hits()
-                                < o.as_attackable().unwrap().hits_max() / 3
-                        })
-                        .reduce(|fewer_hp_obj, next_obj| {
-                            // here we are sure we only have attackables so we are free to use
-                            // unwrap. Here we pick the most closer object
-                            if let Some(next_attackable) = next_obj.as_attackable() {
-                                if let Some(fewer_hp_atttackble) = fewer_hp_obj.as_attackable() {
-                                    if next_attackable.hits() < fewer_hp_atttackble.hits() {
-                                        next_obj
-                                    } else {
-                                        fewer_hp_obj
-                                    }
+                }
+                if self.store().get_free_capacity(Some(ResourceType::Energy))
+                    > self.store().get_capacity(Some(ResourceType::Energy)) as i32 / 2
+                    && creeps.len() < 12
+                {
+                    //used too much energy already, need to save in case of an attack
+                    return;
+                }
+                let object = room
+                    .find(find::STRUCTURES)
+                    .into_iter()
+                    .filter(|o| o.as_attackable().is_some())
+                    .filter(|o| o.structure_type() != StructureType::Controller)
+                    .filter(|o| {
+                        o.as_attackable().unwrap().hits()
+                            < o.as_attackable().unwrap().hits_max() / 3
+                    })
+                    .reduce(|fewer_hp_obj, next_obj| {
+                        // here we are sure we only have attackables so we are free to use
+                        // unwrap. Here we pick the most closer object
+                        if let Some(next_attackable) = next_obj.as_attackable() {
+                            if let Some(fewer_hp_atttackble) = fewer_hp_obj.as_attackable() {
+                                if next_attackable.hits() < fewer_hp_atttackble.hits() {
+                                    next_obj
                                 } else {
                                     fewer_hp_obj
                                 }
                             } else {
-                                warn!("could not get one of the attackables");
                                 fewer_hp_obj
                             }
-                        })
-                        .take();
-                    match object {
-                        Some(obj) => {
-                            towers_target
-                                .insert(tower_pos, TowerTarget::Repair(obj.as_structure().id()));
-                            return;
+                        } else {
+                            warn!("could not get one of the attackables");
+                            fewer_hp_obj
                         }
-                        None => {
-                            info!("could not find anything to repair");
-                        }
+                    })
+                    .take();
+                match object {
+                    Some(obj) => {
+                        towers_target
+                            .insert(tower_pos, TowerTarget::Repair(obj.as_structure().id()));
+                        return;
+                    }
+                    None => {
+                        info!("could not find anything to repair");
                     }
                 }
             }
