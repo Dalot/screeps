@@ -2,10 +2,11 @@ use std::{collections::HashMap, hash::Hash};
 
 use log::*;
 use screeps::{
-    prelude::*, ObjectId, Part, Position, ResourceType, ReturnCode, Source, Structure,
-    StructureObject, StructureSpawn,
+    game, prelude::*, ObjectId, Part, Position, ResourceType, ReturnCode, Source, Store, Structure,
+    StructureObject, StructureSpawn, StructureType,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 use crate::creep::*;
 
@@ -23,7 +24,7 @@ pub enum Role {
 }
 
 pub trait Movable {
-    fn move_to<T>(&self, target: T) -> ReturnCode
+    fn move_to<T>(&self, target: T)
     where
         T: HasPosition;
 }
@@ -31,28 +32,48 @@ pub trait CanHarvest {
     fn harvest(&self, source_id: &Source) -> bool;
 }
 
-pub struct Deposit<'a> {
-    target: Box<&'a dyn Transferable>,
+pub struct Deposit {
+    obj: StructureObject,
     position: Position,
     amount: u32,
+    is_storage: bool,
 }
-impl<'a> HasPosition for Deposit<'a> {
+impl<'a> HasPosition for Deposit {
     fn pos(&self) -> Position {
         self.position
     }
 }
-impl<'a> Deposit<'a> {
-    pub fn target(&self) -> &Box<&'a dyn Transferable> {
-        &self.target
+impl Deposit {
+    pub fn new(o: StructureObject, amount: u32) -> Self {
+        let pos = o.pos();
+        let is_storage = o.structure_type() == StructureType::Storage;
+        Self {
+            obj: o,
+            position: pos,
+            amount,
+            is_storage,
+        }
+    }
+    pub fn transferable(&self) -> Box<&dyn Transferable> {
+        Box::new(self.obj.as_transferable().unwrap())
+    }
+    pub fn withdrawable(&self) -> Box<&dyn Withdrawable> {
+        Box::new(self.obj.as_withdrawable().unwrap())
+    }
+    pub fn store(&self) -> Store {
+        self.obj.as_has_store().unwrap().store()
     }
     pub fn amount(&self) -> u32 {
         self.amount
     }
+    pub fn is_storage(&self) -> bool {
+        self.is_storage
+    }
 }
 pub trait CanDeposit {
-    fn find_closest_depositable(&self, including_containers: bool) -> Option<Deposit>;
+    fn find_closest_depositable(&self, danger: bool) -> Option<Deposit>;
+    fn find_closest_container(&self) -> Option<Deposit>;
     fn deposit(&self, target: Deposit) -> DepositCode;
-    fn find_closest_bank(&self) -> Option<Deposit>;
 }
 
 #[derive(PartialEq)]
@@ -76,7 +97,7 @@ const CLAIM_POS: usize = 7;
 const HARVESTER_POS: usize = 0;
 const HAULER_POS: usize = 1;
 const CLAIMER_POS: usize = 2;
-const WARRIOR_POS: usize = 5;
+const WARRIOR_POS: usize = 3;
 const HEALER_POS: usize = 4;
 const BUILDER_POS: usize = 5;
 const FREE_POS: usize = 6;
@@ -84,9 +105,22 @@ const TANK_POS: usize = 7;
 const GENERAL_POS: usize = 8;
 
 impl Role {
+    pub fn to_string(&self) -> &str {
+        match self {
+            Role::Harvester => "HARVESTER",
+            Role::Hauler => "HAULER",
+            Role::Claimer => "CLAIMER",
+            Role::Warrior => "WARRIOR",
+            Role::Healer => "HEALER",
+            Role::Builder => "BUILDER",
+            Role::Free => "WILDLING",
+            Role::Tank => "TANK",
+            Role::General => "GENERAL",
+        }
+    }
     pub fn find_role(c: &screeps::Creep) -> Option<Role> {
         let index_to_role: HashMap<usize, Role> = [
-            (MOVE_POS, Role::Hauler),
+            (WORK_POS, Role::Harvester),
             (CARRY_POS, Role::Hauler),
             (HEAL_POS, Role::Healer),
             (ATTACK_POS, Role::Warrior),
@@ -129,40 +163,32 @@ impl Role {
                 }
             }
         }
-        let index_of_max = counters
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.cmp(b))
-            .map(|(index, _)| index);
-
-        if let Some(i) = index_of_max {
-            if let Some(r) = index_to_role.get(&i) {
-                Some(r.to_owned())
-            } else {
-                // This means that the creep can be a Harvest, Builder, or Free
-                if i == WORK_POS {
-                    // Here we can see that creep is an Harvester or a Builder
-                    if counters[MOVE_POS] > 0 {
-                        Some(Role::Builder)
-                    } else {
-                        Some(Role::Harvester)
-                    }
-                } else {
-                    Some(Role::General)
-                }
-            }
-        } else {
-            None
-        }
+        if counters[MOVE_POS] == 1 {
+            return Some(Role::Harvester);
+        };
+        if counters[WORK_POS] > 1 {
+            return Some(Role::Builder);
+        };
+        Some(Role::Hauler)
     }
 
-    pub fn find_role_to_spawn(creeps_role: &HashMap<String, Role>) -> Option<Role> {
+    pub fn find_role_to_spawn(roles: &Vec<Role>, num_of_creeps: u32) -> Option<Role> {
+        let ordered_roles = vec![
+            Role::Harvester,
+            Role::Hauler,
+            Role::Warrior,
+            Role::Healer,
+            Role::Builder,
+            Role::Tank,
+            Role::General,
+            Role::Claimer,
+        ];
         let role_to_desired_num: HashMap<Role, usize> = [
-            (Role::Harvester, 1),
-            (Role::Hauler, 1),
+            (Role::Harvester, 2),
+            (Role::Hauler, 5),
             (Role::Warrior, 0),
             (Role::Healer, 0),
-            (Role::Builder, 0),
+            (Role::Builder, 1),
             (Role::Tank, 0),
             (Role::General, 0),
             (Role::Claimer, 0),
@@ -171,8 +197,8 @@ impl Role {
         .iter()
         .cloned()
         .collect();
-        let mut counters = [0 as usize; 8];
-        for (_, role) in creeps_role {
+        let mut counters = [0 as usize; 9];
+        for role in roles.iter() {
             match role {
                 Role::Harvester => {
                     counters[HARVESTER_POS] += 1;
@@ -203,50 +229,52 @@ impl Role {
                 }
             }
         }
-        for (r, num) in role_to_desired_num.iter() {
+        info!("counters: {:?}", counters);
+        for r in ordered_roles.iter() {
+            let desired_num = role_to_desired_num.get(r).unwrap();
             match r {
                 Role::Harvester => {
-                    if *num < counters[HARVESTER_POS] {
+                    if *desired_num > counters[HARVESTER_POS] && num_of_creeps > 2 {
                         return Some(r.clone());
                     }
                 }
                 Role::Hauler => {
-                    if *num < counters[HAULER_POS] {
+                    if *desired_num > counters[HAULER_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Claimer => {
-                    if *num < counters[CLAIMER_POS] {
+                    if *desired_num > counters[CLAIMER_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Warrior => {
-                    if *num < counters[WARRIOR_POS] {
+                    if *desired_num > counters[WARRIOR_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Healer => {
-                    if *num < counters[HEALER_POS] {
+                    if *desired_num > counters[HEALER_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Builder => {
-                    if *num < counters[BUILDER_POS] {
+                    if *desired_num > counters[BUILDER_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Free => {
-                    if *num < counters[FREE_POS] {
+                    if *desired_num > counters[FREE_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::Tank => {
-                    if *num < counters[TANK_POS] {
+                    if *desired_num > counters[TANK_POS] {
                         return Some(r.clone());
                     }
                 }
                 Role::General => {
-                    if *num < counters[HARVESTER_POS] {
+                    if *desired_num > counters[GENERAL_POS] {
                         return Some(r.clone());
                     }
                 }
@@ -256,72 +284,50 @@ impl Role {
         None
     }
 
-    pub fn get_body(&self) -> Vec<Part> {
-        match self {
-            Role::Harvester => [
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Move,
-            ]
-            .to_vec(),
-            Role::Hauler => [
-                Part::Carry,
-                Part::Carry,
-                Part::Carry,
-                Part::Carry,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
+    pub fn get_body(
+        &self,
+        energy_available: u32,
+        capacity: u32,
+        num_creeps: u32,
+    ) -> Option<Vec<Part>> {
+        if energy_available < 300 {
+            return None;
+        }
 
-            ]
-                .to_vec(),
-            Role::Builder => [
-                Part::Carry,
-                Part::Carry,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-            ]
-                .to_vec(),
-            _ => [
-                Part::Carry,
-                Part::Carry,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Work,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-                Part::Move,
-            ].to_vec()
-            // Role::Claimer => todo!(),
-            // Role::Warrior => todo!(),
-            // Role::Healer => todo!(),
-            // Role::Free => todo!(),
-            // Role::Tank => todo!(),
-            // Role::General => todo!(),
+        let mut energy_to_use = energy_available;
+        if capacity > energy_available && num_creeps > 3 {
+            energy_to_use = capacity;
+        }
+
+        match self {
+            Role::Harvester => {
+                let mut parts = [Part::Work, Part::Work, Part::Move].to_vec();
+                let missing_parts = (energy_to_use - 250) / 100;
+                for _ in 0..missing_parts {
+                    parts.push(Part::Work);
+                }
+                Some(parts)
+            }
+            Role::Hauler => {
+                let mut parts = [Part::Carry, Part::Move, Part::Move].to_vec();
+                let missing_parts = (energy_to_use - 150) / 150;
+                for _ in 0..missing_parts {
+                    parts.push(Part::Carry);
+                    parts.push(Part::Move);
+                    parts.push(Part::Move);
+                }
+                Some(parts)
+            }
+            Role::Builder | _ => {
+                let mut parts = [Part::Carry, Part::Move, Part::Work].to_vec();
+                let missing_parts = (energy_to_use - 200) / 200;
+                for _ in 0..missing_parts {
+                    parts.push(Part::Carry);
+                    parts.push(Part::Work);
+                    parts.push(Part::Move);
+                }
+                Some(parts)
+            }
         }
     }
 }

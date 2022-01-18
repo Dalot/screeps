@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use creep::*;
 use log::*;
-use role::Role;
+use roles::role::Role;
 use screeps::{
     find, game, look, prelude::*, ObjectId, Part, RawMemory, ReturnCode, RoomObjectProperties,
     Source, StructureObject,
@@ -13,7 +13,6 @@ use wasm_bindgen::prelude::*;
 
 mod creep;
 mod logging;
-mod role;
 mod roles;
 mod storage;
 mod tower;
@@ -36,18 +35,17 @@ pub fn game_loop() {
         db.clean_up();
     }
 
-    let mut creeps_role_map = HashMap::<String, Role>::new();
+    let mut num_creeps = 0;
     // If a creep does not have a role, find the appropriate role and add it to the local storage
     CREEPS_ROLE.with(|creeps_role_refcell| {
         let mut creeps_role = creeps_role_refcell.borrow_mut();
         for creep in game::creeps().values() {
+            num_creeps += 1;
             let creep_name = creep.name();
-            if let Some(r) = creeps_role.get(&creep.name()) {
-                creeps_role_map.insert(creep_name, r.clone());
-            } else {
+            if let None = creeps_role.get(&creep.name()) {
                 let role = Role::find_role(&creep);
                 if let Some(r) = role {
-                    creeps_role.insert(creep_name, r);
+                    creeps_role.insert(creep_name, r.clone());
                 } else {
                     creeps_role.insert(creep_name, Role::General);
                 }
@@ -55,12 +53,19 @@ pub fn game_loop() {
         }
     });
 
+    let mut roles = Vec::<Role>::new();
     CREEPS_TARGET.with(|creeps_target_refcell| {
         let mut creeps_target = creeps_target_refcell.borrow_mut();
         for creep in game::creeps().values() {
             let mut creep = Creep::new(&creep);
-            let r = creeps_role_map.get(&creep.name()).cloned();
-            creep.set_role(r);
+            CREEPS_ROLE.with(|creeps_role_refcell| {
+                let creeps_role = creeps_role_refcell.borrow();
+                let r = creeps_role.get(&creep.name()).cloned();
+                creep.set_role(r.clone());
+                if let Some(val) = r {
+                    roles.push(val);
+                }
+            });
             let hostiles = creep.room().unwrap().find(find::HOSTILE_CREEPS);
             creep.run(&mut creeps_target, hostiles.len() > 0);
         }
@@ -101,55 +106,33 @@ pub fn game_loop() {
     for spawn in game::spawns().values() {
         debug!("running spawn {}", String::from(spawn.name()));
 
-        // Part::Move => 50,
-        // Part::Work => 100,
-        // Part::Carry => 50,
-        // Part::Attack => 80,
-        // Part::RangedAttack => 150,
-        // Part::Tough => 10,
-        // Part::Heal => 250,
-        // Part::Claim => 600,
-        // 15 part is costing us -> 1000
-        let body = [
-            Part::Carry,
-            Part::Carry,
-            Part::Carry,
-            Part::Work,
-            Part::Work,
-            Part::Work,
-            Part::Work,
-            Part::Work,
-            Part::Move,
-            Part::Move,
-            Part::Move,
-            Part::Move,
-            Part::Move,
-            Part::Move,
-            Part::Move,
-        ];
         let name_base = game::time();
-        let name = format!("{}-{}", name_base, additional);
-        if let Some(role_needed) = Role::find_role_to_spawn(&creeps_role_map) {
-            let b = role_needed.get_body();
-            if spawn.room().unwrap().energy_available() >= b.iter().map(|p| p.cost()).sum() {
-                let res = spawn.spawn_creep(&body, &name);
-                if res != ReturnCode::Ok {
-                    warn!("couldn't spawn: {:?}", res);
-                } else {
-                    additional += 1;
+        let mut name = format!("{}-{}", name_base, additional);
+        // TODO: Have a phase on the game that will influence the body part
+        if let Some(role_needed) = Role::find_role_to_spawn(&roles, num_creeps) {
+            let energy_available = spawn.room().unwrap().energy_available();
+            let capacity = spawn.room().unwrap().energy_capacity_available();
+
+            let b = role_needed.get_body(energy_available, capacity, num_creeps);
+
+            if let Some(val) = b {
+                if energy_available >= val.iter().map(|p| p.cost()).sum() {
+                    name = format!("{}-{}", role_needed.to_string(), name);
+                    let res = spawn.spawn_creep(&val, &name);
+                    if res != ReturnCode::Ok {
+                        warn!("couldn't spawn: {:?}", res);
+                    } else {
+                        additional += 1;
+                        CREEPS_ROLE.with(|creeps_role_refcell| {
+                            let mut creeps_role = creeps_role_refcell.borrow_mut();
+                            creeps_role.insert(name, role_needed);
+                        });
+                    }
                 }
             }
             continue;
         } else {
-            // TODO: Have a phase on the game that will influence the body part
-            if spawn.room().unwrap().energy_available() >= body.iter().map(|p| p.cost()).sum() {
-                let res = spawn.spawn_creep(&body, &name);
-                if res != ReturnCode::Ok {
-                    warn!("couldn't spawn: {:?}", res);
-                } else {
-                    additional += 1;
-                }
-            }
+            continue;
         }
     }
 

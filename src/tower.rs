@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::storage::*;
 use log::*;
 use screeps::{
-    find, game, Attackable, Creep as ScreepsCreep, HasTypedId, MaybeHasNativeId, Part, Position,
-    ResourceType, ReturnCode, Room, RoomPosition, Store, Structure, StructureProperties,
+    find, game, Attackable, Creep as ScreepsCreep, HasPosition, HasTypedId, MaybeHasNativeId, Part,
+    Position, ResourceType, ReturnCode, Room, RoomPosition, Store, Structure, StructureProperties,
     StructureTower, StructureType,
 };
 pub struct Tower<'a> {
@@ -109,6 +109,7 @@ impl<'a> Tower<'a> {
                         o.as_attackable().unwrap().hits()
                             < o.as_attackable().unwrap().hits_max() / 3
                     })
+                    .filter(|o| o.pos().get_range_to(self.pos()) <= 5)
                     .reduce(|fewer_hp_obj, next_obj| {
                         // here we are sure we only have attackables so we are free to use
                         // unwrap. Here we pick the most closer object
@@ -135,7 +136,7 @@ impl<'a> Tower<'a> {
                         return;
                     }
                     None => {
-                        info!("could not find anything to repair");
+                        debug!("could not find anything to repair");
                     }
                 }
             }

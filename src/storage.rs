@@ -1,6 +1,6 @@
-use crate::role::Role;
+use crate::roles::role::Role;
 use screeps::{
-    Attackable, ConstructionSite, Healable, ObjectId, Position, Resource, Source, Structure,
+    Attackable, ConstructionSite, Creep, Healable, ObjectId, Position, Resource, Source, Structure,
     StructureController, StructureTower,
 };
 use serde::{Deserialize, Serialize};
@@ -18,13 +18,13 @@ thread_local! {
 // this enum will represent a creep's lock on a specific target object, storing a js reference to the object id so that we can grab a fresh reference to the object each successive tick, since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
 #[derive(Clone)]
 pub enum CreepTarget {
-    UpgradeController(ObjectId<StructureController>),
-    UpgradeConstructionSite(ConstructionSite),
-    Harvest(ObjectId<Source>),
-    Deposit(),
-    Pickup(Resource),
-    // Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
-    Repair(ObjectId<Structure>),
+    TransferToCreep(Creep), // UpgradeController(ObjectId<StructureController>),
+                            // UpgradeConstructionSite(ConstructionSite),
+                            // Harvest(ObjectId<Source>),
+                            // Deposit(),
+                            // Pickup(Resource),
+                            // Harvester(Option<ObjectId<Source>>, Option<StructureObject>),
+                            // Repair(ObjectId<Structure>)
 }
 // this enum will represent a creep's lock on a specific target object, storing a js reference to the object id so that we can grab a fresh reference to the object each successive tick, since screeps game objects become 'stale' and shouldn't be used beyond the tick they were fetched
 pub enum TowerTarget {
