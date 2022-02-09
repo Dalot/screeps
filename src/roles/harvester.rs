@@ -1,8 +1,8 @@
 use crate::creep::*;
 use log::*;
 use screeps::{
-    find, look, prelude::*, Look, Position, ResourceType, ReturnCode, RoomPosition, Source,
-    StructureContainer, StructureType,
+    find, look, prelude::*, Look, Position, ResourceType, ReturnCode, Room, RoomPosition, Source,
+    StructureContainer, StructureObject, StructureType,
 };
 
 use super::role::{CanHarvest, Deposit, Movable};
@@ -54,11 +54,7 @@ impl<'a> Harvester<'a> {
         for s in sources.iter() {
             let deposit = self.find_closest_container_from_source(s.pos());
             if let Some(d) = deposit {
-                let creeps = self
-                    .creep
-                    .room()
-                    .unwrap()
-                    .look_for_at(look::CREEPS, &d.pos());
+                let creeps = room.look_for_at(look::CREEPS, &d.pos());
                 let objs = creeps
                     .iter()
                     .filter(|creep| creep.pos() != self.creep.pos())
@@ -67,7 +63,8 @@ impl<'a> Harvester<'a> {
                     source_container.push((s.clone(), d.pos()));
                 }
             } else {
-                warn!("did not find cointainer near this source");
+                build_container_around_source(room.clone(), s.pos());
+                warn!("did not find container near this source {:?}", s.pos());
             }
         }
         if source_container.len() > 0 {
@@ -96,10 +93,10 @@ impl<'a> Harvester<'a> {
         source_pos: Position,
     ) -> Option<StructureContainer> {
         let room = self.creep.room().unwrap();
-        let structures = room.find(find::STRUCTURES);
+        let structures = room.find(find::MY_STRUCTURES);
         let container_obj = structures
             .iter()
-            .filter(|s| s.structure_type() == StructureType::Container)
+            .filter(|o| o.structure_type() == StructureType::Container)
             .reduce(|closer, next| {
                 if closer.pos().get_range_to(source_pos) > next.pos().get_range_to(source_pos) {
                     next
@@ -114,4 +111,15 @@ impl<'a> Harvester<'a> {
             None
         }
     }
+}
+
+fn build_container_around_source(room: Room, source_pos: Position) {
+    let area = room.look_at_area(
+        source_pos.y().u8() - 1,
+        source_pos.x().u8() - 1,
+        source_pos.y().u8() + 1,
+        source_pos.x().u8() + 1,
+        true,
+    );
+    // let objs = js_sys::Array::from(&area).map(|x: Vec<StructureObject>| x.map().collect());
 }

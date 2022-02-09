@@ -166,6 +166,14 @@ impl Role {
         if counters[MOVE_POS] == 1 {
             return Some(Role::Harvester);
         };
+        if c.body().len() == 15 {
+            let rnd_number = rnd_source_idx(5);
+            if rnd_number < 1 {
+                return Some(Role::Hauler);
+            } else {
+                return Some(Role::Builder);
+            }
+        }
         if counters[WORK_POS] > 1 {
             return Some(Role::Builder);
         };
@@ -330,4 +338,7 @@ impl Role {
             }
         }
     }
+}
+fn rnd_source_idx(max: usize) -> usize {
+    js_sys::Math::floor(js_sys::Math::random() * max as f64) as usize
 }
